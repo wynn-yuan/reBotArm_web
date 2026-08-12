@@ -89,6 +89,8 @@ export interface AgingRecordingStatus {
   error: string | null;
   root: string | null;
   recording_error: string | null;
+  temp_limit_c: number | null;
+  temp_protection: { joint: number; temperature_c: number; limit_c: number } | null;
 }
 
 export interface AgingStartConfig {
@@ -96,6 +98,8 @@ export interface AgingStartConfig {
   loop_count?: number;
   duration_minutes?: number;
   interval_sec: number;
+  /** 温度保护：任一关节 MOS 温度达到该值(°C)时自动停止并归位。可选，不传则不保护。 */
+  temp_limit_c?: number;
 }
 
 export interface AgingLogDirectoriesResponse {

@@ -87,6 +87,7 @@ class AgingRuntime:
         self._latest_frame_at = 0.0
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._temp_limit_c: float | None = None
         self._status: dict[str, Any] = {
             "available": bool(settings.allow_aging_write),
             "status": "inactive",
@@ -100,6 +101,8 @@ class AgingRuntime:
             "started_at": None,
             "updated_at": utc_now_iso(),
             "stop_requested": False,
+            "temp_limit_c": None,
+            "temp_protection": None,
             "error": None,
         }
 
@@ -153,6 +156,7 @@ class AgingRuntime:
             }:
                 raise AgingRuntimeBusy("an aging cycle is already active")
             self._stop = threading.Event()
+            self._temp_limit_c = normalized_config.get("temp_limit_c")
             self._status.update(
                 status="starting",
                 phase="preflight",
@@ -165,6 +169,8 @@ class AgingRuntime:
                 started_at=utc_now_iso(),
                 updated_at=utc_now_iso(),
                 stop_requested=False,
+                temp_limit_c=self._temp_limit_c,
+                temp_protection=None,
                 error=None,
             )
 
@@ -246,7 +252,11 @@ class AgingRuntime:
                 round_number = self.status()["completed_rounds"] + 1
                 self._set_phase("running_trajectory", round=round_number)
                 self._play(action["samples"], velocity_limits)
-
+                # Temperature protection (or a manual stop mid-trajectory)
+                # already requested a stop; go straight to the stopping home
+                # sequence instead of returning home a second time.
+                if self._stop.is_set():
+                    break
                 self._set_phase("returning_home")
                 self._home()
                 self._set_phase("verifying_home")
@@ -304,10 +314,65 @@ class AgingRuntime:
                     error=error,
                 )
 
+    def _check_temperature(self) -> tuple[int, float, float] | None:
+        """Return ``(joint_id, temperature, limit)`` of the first joint whose MOS
+        temperature reaches the configured limit, or ``None`` when no limit is
+        set / no fresh frame is available. Temperature comes from the same real
+        telemetry frame already consumed by monitoring (never a second read).
+        """
+        if self._temp_limit_c is None:
+            return None
+        with self._telemetry_lock:
+            frame = self._latest_frame
+        if frame is None:
+            return None
+        joints = frame.get("joints")
+        if not isinstance(joints, list):
+            return None
+        for joint in joints:
+            temperature = joint.get("temperature")
+            temp = temperature.get("mos") if isinstance(temperature, Mapping) else None
+            if (
+                isinstance(temp, (int, float))
+                and not isinstance(temp, bool)
+                and math.isfinite(float(temp))
+                and float(temp) >= self._temp_limit_c
+            ):
+                return (int(joint.get("id")), float(temp), float(self._temp_limit_c))
+        return None
+
+    def _trigger_temp_protection(self, joint_id: int, temperature: float, limit: float) -> None:
+        """Stop the cycle and return home when a joint exceeds the temperature limit.
+
+        The event is appended to the active session's ``events.jsonl`` so the
+        operator can audit exactly when and why aging stopped.
+        """
+        with self._lock:
+            self._status["temp_protection"] = {
+                "joint": joint_id,
+                "temperature_c": temperature,
+                "limit_c": limit,
+            }
+        self._stop.set()
+        self._set_phase("stopping")
+        try:
+            self._recorder.append_event({
+                "type": "safety_temp_exceeded",
+                "joint_id": joint_id,
+                "temperature_c": temperature,
+                "limit_c": limit,
+            })
+        except Exception:
+            pass
+
     def _play(self, samples: Sequence[Sequence[float]], velocity_limits: Sequence[float]) -> None:
         deadline = time.monotonic()
         for sample in samples:
             if self._stop.is_set():
+                return
+            violation = self._check_temperature()
+            if violation is not None:
+                self._trigger_temp_protection(*violation)
                 return
             if self._recorder.status()["status"] != "recording":
                 raise AgingSafetyFault("telemetry recording stopped unexpectedly")
@@ -489,6 +554,14 @@ class AgingRuntime:
             if not _finite(minutes) or float(minutes) <= 0:
                 raise AgingValidationError("duration_minutes must be positive")
             normalized_config["duration_sec"] = float(minutes) * 60.0
+
+        # Optional temperature protection: when any joint's MOS temperature
+        # reaches this limit during execution, aging stops and returns home.
+        temp_limit = config.get("temp_limit_c")
+        if temp_limit is not None:
+            if not _finite(temp_limit) or not 0 < float(temp_limit) <= 200:
+                raise AgingValidationError("temp_limit_c must be between 0 and 200")
+            normalized_config["temp_limit_c"] = float(temp_limit)
 
         normalized_action = {
             "id": str(action.get("id") or "processed-action"),

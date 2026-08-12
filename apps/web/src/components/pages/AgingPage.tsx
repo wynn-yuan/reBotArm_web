@@ -34,6 +34,8 @@ const EMPTY_STATUS: AgingRecordingStatus = {
   error: null,
   root: null,
   recording_error: null,
+  temp_limit_c: null,
+  temp_protection: null,
 };
 
 const PHASE_LABELS: Record<string, string> = {
@@ -64,6 +66,7 @@ export function AgingPage() {
   const [loopCount, setLoopCount] = useState(10);
   const [durationMinutes, setDurationMinutes] = useState(60);
   const [intervalSec, setIntervalSec] = useState(2);
+  const [tempLimitC, setTempLimitC] = useState('');
   const [logStatus, setLogStatus] = useState<AgingLogStatus | null>(null);
   const [runtime, setRuntime] = useState<AgingRecordingStatus>(EMPTY_STATUS);
   const [loading, setLoading] = useState(true);
@@ -122,6 +125,7 @@ export function AgingPage() {
             ...(loopMode === 'count' ? { loop_count: loopCount } : {}),
             ...(loopMode === 'duration' ? { duration_minutes: durationMinutes } : {}),
             interval_sec: intervalSec,
+            ...(tempLimitC.trim() !== '' ? { temp_limit_c: Number(tempLimitC) } : {}),
           })
         : await stopAgingRecording();
       setRuntime(result);
@@ -178,6 +182,10 @@ export function AgingPage() {
               {loopMode === 'duration' && <NumberField id="aging-duration" label="分钟" value={durationMinutes} min={1} step={1} disabled={active} onChange={setDurationMinutes} />}
               <NumberField id="aging-interval" label="间隔（秒）" value={intervalSec} min={0} step={0.5} disabled={active} onChange={setIntervalSec} />
             </div>
+            <div className="field">
+              <label className="field-label" htmlFor="aging-temp-limit">温度保护 °C（可选，任一关节达此温度自动停止并归位）</label>
+              <input id="aging-temp-limit" className="input" type="number" min="0" step="0.5" value={tempLimitC} placeholder="留空 = 不限制" disabled={active} onChange={(event) => setTempLimitC(event.target.value)} />
+            </div>
 
             {!active
               ? <button className="btn btn--primary btn--lg" type="button" disabled={!canStart || submitting} onClick={() => setConfirmAction('start')}><Play size={16} /> 启动老化</button>
@@ -194,6 +202,14 @@ export function AgingPage() {
             <Row label="已完成" value={String(runtime.completed_rounds)} />
             <Row label="遥测帧" value={String(runtime.frames_written)} />
             <Row label="数据行" value={String(runtime.rows_written)} />
+            {runtime.temp_limit_c !== null && <Row label="温度保护" value={`${runtime.temp_limit_c} °C`} />}
+            {runtime.temp_protection && (
+              <div className="state-box state-box--error" role="alert">
+                <div className="state-box__desc">
+                  温度保护触发：M{runtime.temp_protection.joint} 温度 {runtime.temp_protection.temperature_c.toFixed(1)}°C 达到上限 {runtime.temp_protection.limit_c}°C，已自动停止并归位。
+                </div>
+              </div>
+            )}
             {(runtime.error || runtime.recording_error) && <div className="state-box state-box--error" role="alert"><div className="state-box__desc">{runtime.error ?? runtime.recording_error}</div></div>}
           </div>
         </section>

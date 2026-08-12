@@ -8,12 +8,15 @@ the 10 Hz telemetry emitter.
 
 from __future__ import annotations
 
+import logging
 import queue
 import threading
 from typing import Any, Mapping, Optional
 
 from .aging_logs import AgingLogStore
 from .models import utc_now_iso
+
+logger = logging.getLogger(__name__)
 
 
 class AgingRecorderError(RuntimeError):
@@ -148,6 +151,21 @@ class AgingRecorder:
             target.put_nowait(snapshot)
         except queue.Full:
             self._fail("telemetry log queue is full; recording stopped to avoid silent data loss")
+
+    def append_event(self, event: Mapping[str, Any]) -> None:
+        """Append one JSON event to the active session's ``events.jsonl``.
+
+        Used by the aging runtime for in-session safety events (e.g. the
+        temperature-protection trigger). No-op when no session is active.
+        """
+        with self._lock:
+            session_path = self._session_path
+        if session_path is None:
+            return
+        try:
+            self._store.append_event(session_path, dict(event))
+        except Exception as exc:
+            logger.warning("append aging event failed: %s: %s", type(exc).__name__, exc)
 
     def stop(self) -> dict[str, Any]:
         with self._lock:

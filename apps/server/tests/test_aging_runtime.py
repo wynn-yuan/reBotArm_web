@@ -61,6 +61,7 @@ class FakeRecorder:
         self.started = None
         self.processed = None
         self.frames = 0
+        self.events = []
 
     def start(self, metadata=None, *, processed_action=None):
         self.state = "recording"
@@ -71,6 +72,9 @@ class FakeRecorder:
     def accept_frame(self, _frame):
         if self.state == "recording":
             self.frames += 1
+
+    def append_event(self, event):
+        self.events.append(dict(event))
 
     def stop(self):
         self.state = "inactive"
@@ -151,6 +155,48 @@ class AgingRuntimeTests(unittest.TestCase):
                 action(),
                 {"loop_mode": "count", "loop_count": 1, "interval_sec": 0},
             )
+
+    def test_temp_limit_validation_rejects_invalid(self):
+        runtime = AgingRuntime(settings(), FakeService(), FakeRecorder())
+        runtime.accept_frame(frame())
+        for bad in (0, -1, 200.5, "hot"):
+            with self.assertRaisesRegex(Exception, "temp_limit_c", msg=str(bad)):
+                runtime.start(
+                    action(),
+                    {"loop_mode": "count", "loop_count": 1, "interval_sec": 0, "temp_limit_c": bad},
+                )
+
+    def test_temp_protection_stops_and_writes_event(self):
+        recorder = FakeRecorder()
+        service = FakeService()
+        runtime = AgingRuntime(settings(), service, recorder)
+        # frame() reports mos temperature 30.0 °C on every joint.
+        runtime.accept_frame(frame())
+
+        started = runtime.start(
+            action(),
+            {"loop_mode": "count", "loop_count": 1, "interval_sec": 0, "temp_limit_c": 25},
+        )
+        self.assertEqual(started["temp_limit_c"], 25.0)
+        ended = self.wait_terminal(runtime)
+
+        self.assertEqual(ended["status"], "completed")
+        self.assertEqual(ended["completed_rounds"], 0)
+        protection = ended["temp_protection"]
+        self.assertIsNotNone(protection)
+        self.assertEqual(protection["joint"], 1)
+        self.assertEqual(protection["temperature_c"], 30.0)
+        self.assertEqual(protection["limit_c"], 25.0)
+        # The session event was appended for audit.
+        self.assertEqual(recorder.events[0]["type"], "safety_temp_exceeded")
+        self.assertEqual(recorder.events[0]["joint_id"], 1)
+        self.assertEqual(recorder.events[0]["temperature_c"], 30.0)
+
+    def test_check_temperature_within_limit_returns_none(self):
+        runtime = AgingRuntime(settings(), FakeService(), FakeRecorder())
+        runtime.accept_frame(frame())  # mos = 30.0
+        runtime._temp_limit_c = 40.0
+        self.assertIsNone(runtime._check_temperature())
 
     def test_backend_rejects_trajectory_outside_joint_limits(self):
         invalid = action()

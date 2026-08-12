@@ -157,6 +157,9 @@ class AgingCycleConfigRequest(BaseModel):
     loop_count: Optional[int] = None
     duration_minutes: Optional[float] = None
     interval_sec: float = 0.0
+    # Optional temperature protection: any joint MOS temperature reaching this
+    # value stops aging and returns home (event written to the session log).
+    temp_limit_c: Optional[float] = None
 
 
 class AgingRecordingStartRequest(BaseModel):
