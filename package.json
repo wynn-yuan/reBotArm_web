@@ -1,0 +1,14 @@
+{
+  "name": "rebotarm-platform",
+  "private": true,
+  "version": "0.1.0",
+  "description": "reBotArm 平台 monorepo —— Web 控制台（UI 原型）、后端服务、机器人描述与共享包的统一工作区",
+  "workspaces": [
+    "apps/web"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace @rebotarm/web --",
+    "build": "npm run build --workspace @rebotarm/web",
+    "type-check": "npm run type-check --workspace @rebotarm/web"
+  }
+}

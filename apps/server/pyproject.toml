@@ -1,0 +1,42 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "rebot-server"
+version = "0.1.0"
+description = "reBotArm backend: motorbridge 0.5.1 read-only CAN scan & telemetry (no motion control)"
+readme = { text = "reBotArm backend service", content-type = "text/plain" }
+requires-python = ">=3.10"
+license = { text = "Proprietary" }
+authors = [{ name = "reBotArm" }]
+dependencies = [
+    "fastapi>=0.110,<1.0",
+    "uvicorn[standard]>=0.29",
+    "python-dotenv>=1.0",
+    # Pinned EXACTLY: this server is verified against the motorbridge 0.5.1
+    # source only (scan + telemetry read-only audit). Startup fails closed on
+    # any other version; see rebot_server/sdkcheck.py.
+    # 0.5.1 audit (Phase 7B): the 0.5.1 sdist Python binding layer
+    # (core.py / models.py / __init__.py / abi.py / cli/scan.py /
+    # tests/test_api_surface.py) is byte-for-byte identical to the audited
+    # 0.4.9 sdist; the only code delta is the CLI motion-run register
+    # 0x7017->0x7024 (a parameter write this server never makes).
+    "motorbridge==0.5.1",
+]
+
+[project.optional-dependencies]
+# httpx is required by fastapi's TestClient for the API contract tests.
+dev = [
+    "pytest>=8.0",
+    "httpx>=0.27",
+]
+
+[project.scripts]
+rebot-server = "rebot_server.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/rebot_server"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

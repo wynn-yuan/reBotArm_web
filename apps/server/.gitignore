@@ -1,0 +1,15 @@
+# Python artifacts (never commit or ship these)
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Environments / local config
+.venv/
+venv/
+.env
+
+# Test caches
+.pytest_cache/
+.coverage

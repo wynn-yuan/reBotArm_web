@@ -1,0 +1,123 @@
+/* 设计令牌：颜色、字号、间距、阴影。
+   不使用 Tailwind，所有视觉系统从这里取值。
+
+   第二版：克制的浅色工业界面。
+   - 白色主背景 + 浅灰分区，细边框，宽留白，系统字体。
+   - 主操作为中性墨色（#1d1d1f 级），彩色只保留给 在线/警告/危险/信息 状态。
+   - 不使用大面积渐变、玻璃拟态或重阴影。 */
+:root {
+  /* ---- 背景层级 ---- */
+  --bg-base: #ffffff;
+  --bg-surface: #ffffff;
+  --bg-surface-2: #f5f5f7;
+  --bg-elevated: #f5f5f7;
+  --bg-inset: #f5f5f7;
+  --bg-overlay: rgba(29, 29, 31, 0.42);
+
+  /* ---- 边框（细） ---- */
+  --border-subtle: #ececf0;
+  --border-default: #d9d9de;
+  --border-strong: #a1a1a6;
+  --border-focus: #1d1d1f;
+
+  /* ---- 文字 ---- */
+  --text-primary: #1d1d1f;
+  --text-secondary: #515154;
+  --text-tertiary: #86868b;
+  --text-disabled: #bcbcc2;
+  --text-inverse: #ffffff;
+
+  /* ---- 主操作（中性墨色，不是品牌彩） ---- */
+  --color-primary: #1d1d1f;
+  --color-primary-hover: #3a3a3c;
+  --color-primary-active: #000000;
+  --color-primary-dim: #f5f5f7;
+  --color-primary-border: #d9d9de;
+
+  /* ---- 状态语义色（仅用于在线/警告/危险/信息） ---- */
+  --color-online-dim: rgba(16, 124, 51, 0.08);
+  --color-online-border: rgba(16, 124, 51, 0.35);
+
+  --color-warning: #b25e00;
+  --color-warning-dim: rgba(178, 94, 0, 0.08);
+  --color-warning-border: rgba(178, 94, 0, 0.35);
+
+  --color-danger: #c41e2f;
+  --color-danger-hover: #a51626;
+  --color-danger-dim: rgba(196, 30, 47, 0.08);
+  --color-danger-border: rgba(196, 30, 47, 0.35);
+
+  --color-info: #0060c6;
+  --color-info-dim: rgba(0, 96, 198, 0.08);
+  --color-info-border: rgba(0, 96, 198, 0.35);
+
+  /* ---- 状态徽标取值 ---- */
+  --status-online: #107c33;
+  --status-busy: #b25e00;
+  --status-offline: #86868b;
+  --status-error: #c41e2f;
+  --status-ok: #107c33;
+  --status-warn: #b25e00;
+
+  /* ---- 间距（更宽，留白更足） ---- */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-7: 28px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+
+  /* ---- 字号 ---- */
+  --font-xs: 11px;
+  --font-sm: 12px;
+  --font-md: 13px;
+  --font-lg: 14px;
+  --font-xl: 16px;
+  --font-2xl: 20px;
+  --font-3xl: 24px;
+  --font-4xl: 32px;
+
+  /* ---- 行高 ---- */
+  --leading-tight: 1.2;
+  --leading-snug: 1.4;
+  --leading-normal: 1.55;
+
+  /* ---- 字体（系统字体栈） ---- */
+  --font-base: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+    'Microsoft YaHei', 'Hiragino Sans GB', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --font-mono: 'SF Mono', 'Cascadia Code', 'JetBrains Mono', Consolas,
+    'Roboto Mono', Menlo, monospace;
+
+  /* ---- 圆角（克制使用） ---- */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 10px;
+
+  /* ---- 阴影（克制，极浅） ---- */
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.05);
+  --shadow-2: 0 1px 3px rgba(0, 0, 0, 0.08), 0 4px 12px rgba(0, 0, 0, 0.04);
+  --shadow-modal: 0 6px 24px rgba(0, 0, 0, 0.16), 0 2px 6px rgba(0, 0, 0, 0.08);
+
+  /* ---- 布局 ---- */
+  --topbar-height: 56px;
+  --pagenav-height: 44px;
+  --banner-height: 32px;
+  --content-max-width: 1440px;
+
+  /* ---- 图表与三维场景（浅色适配） ---- */
+  --chart-axis: #d9d9de;
+  --chart-grid: #ececf0;
+  --chart-text: #86868b;
+  --chart-text-strong: #515154;
+  --scene-bg: #f5f5f7;
+  --scene-grid-cell: #d8d8dc;
+  --scene-grid-section: #b9b9c0;
+
+  /* ---- 动效 ---- */
+  --transition-fast: 120ms ease;
+  --transition-base: 160ms ease;
+}

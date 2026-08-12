@@ -1,0 +1,52 @@
+# 依赖
+node_modules/
+
+# 构建产物（任意层级）
+dist/
+**/dist/
+build/
+**/build/
+.vite/
+**/.vite/
+
+# TypeScript 生成物（禁止进入源码目录）
+*.tsbuildinfo
+vite.config.js
+vite.config.d.ts
+
+# 日志
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# 环境文件（保留示例文件）
+.env
+.env.*
+!.env.example
+
+# Python 缓存与虚拟环境（未来后端/脚本工具链）
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+# 保留部署环境模板（deploy/jetson/env/ 下的 *.env.template）
+!deploy/jetson/env/
+!deploy/jetson/env/**
+
+# 测试覆盖率
+coverage/
+*.lcov
+
+# 部署打包输出（deploy/jetson/make_release.sh）
+deploy/jetson/out/
+
+# 编辑器 / 系统文件
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
