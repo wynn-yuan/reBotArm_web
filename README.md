@@ -113,8 +113,9 @@ scp deploy/jetson/out/rebotarm-release-<id>.tar.gz <user>@<host>:~/rebotarm-inst
 # 3. Jetson：安装（保留现有 env，成功才切换 current）
 sh ~/rebotarm-install/install_release.sh ~/rebotarm-install/rebotarm-release-<id>.tar.gz
 
-# 4. Jetson：初始化 CAN（PCAN-USB，需 sudo）
-sudo $BASE/bin/rebotarm-can-init.sh can1 1000000
+# 4. Jetson：初始化 CAN（PCAN-USB，需 sudo；脚本自动定位 PCAN 接口）
+sudo $BASE/bin/rebotarm-can-init.sh 1000000
+#    输出 "检测到 PCAN SocketCAN 接口: canX"，把 canX 填到 env 的 REBOT_CAN_CHANNEL
 
 # 5. 启动 / 健康检查 / 停止
 $BASE/bin/rebotarm-start.sh
@@ -157,6 +158,31 @@ REBOT_LOG_LEVEL=INFO
   `$BASE/Trajectory`，均不由 UI 选择。
 - MIT 增益可选：`REBOT_MIT_KP=50,150,150,50,50,50,50`、`REBOT_MIT_KD=3,10,10,5,4,4,4`。
 - 门禁为 `1` 只表示对应接口在用户确认后可调用，服务启动不自动扫描/使能/回零/动作。
+
+## CAN 接口（PCAN-USB）
+
+SocketCAN 接口名**不固定**：Jetson 板载 CAN（`mttcan`、`mcp251xfd`）会占用一部分
+接口名，PCAN-USB 的具体名字取决于 USB 枚举顺序（常见 `can0/can1/can2`），插拔或
+重载驱动后可能变化。**不要写死为 can1**。
+
+三步配置：
+
+```bash
+# 1. 初始化 CAN，并读出 PCAN 实际接口名
+sudo $BASE/bin/rebotarm-can-init.sh 1000000
+#    输出: "检测到 PCAN SocketCAN 接口: canX"（X 以实际为准）
+
+# 2. 把 env 的 REBOT_CAN_CHANNEL 设为该接口名
+sed -i "s/^REBOT_CAN_CHANNEL=.*/REBOT_CAN_CHANNEL=canX/" $BASE/shared/env/rebotarm.env
+
+# 3. 重启服务生效
+$BASE/bin/rebotarm-stop.sh && $BASE/bin/rebotarm-start.sh
+```
+
+`rebotarm-can-init.sh` 会遍历 `/sys/class/net/can*` 找出驱动为 `pcan` 的接口
+（自动跳过板载 `mttcan`/`mcp251xfd`），并用 1 Mbps 拉起。若找不到 pcan 接口，说明
+PCAN 驱动未以 SocketCAN 模式编译（需 `make NET=NETDEV_SUPPORT` 重新编译
+`peak-linux-driver`），见 `deploy/jetson/SOURCE_DEPLOYMENT.md` 第 4 节。
 
 ## 老化循环与日志
 
@@ -204,7 +230,8 @@ readlink "$BASE/current"
 
 - Node 版本不足：升级到 20.19+ / 22.12+。
 - motorbridge 不是 0.5.1：服务 fail closed，不跳过版本门。
-- `can1` 不存在或未 UP：跑 `sudo $BASE/bin/rebotarm-can-init.sh can1 1000000` 检查 PCAN-USB。
+- PCAN 接口不存在或未 UP：跑 `sudo $BASE/bin/rebotarm-can-init.sh 1000000` 看检测输出；
+  再核对 env 的 `REBOT_CAN_CHANNEL` 是否等于检测到的接口名。
 - 服务重启后未连接：UI 中操作者重新扫描（初始 `disconnected` 是预期）。
 - 老化按钮不可用：确认完整连接、新鲜真机遥测、`REBOT_ALLOW_AGING_WRITE=1`、Trajectory 有动作。
 - 老化报 `home verification failed`：机械臂仍应在零位附近，通常是 MIT 稳态残差，可核对 `log` 遥测。
