@@ -34,6 +34,11 @@ TELEMETRY_TIMEOUT_S = 0.8
 # zero-torque->enable transition that momentarily interrupts active reporting.
 TELEMETRY_READY_TIMEOUT_S = 15.0
 FOLLOWING_ERROR_RAD = 0.5
+# How many consecutive frames must exceed the following-error limit before the
+# cycle is aborted.  A single transient frame (e.g. a telemetry read that just
+# missed a quick position update) will not interrupt the run; a sustained loss
+# of tracking (3 frames under the same error) will.
+FOLLOWING_ERROR_CONSECUTIVE_LIMIT = 3
 MAX_TRAJECTORY_SAMPLES = 250_000
 JOINT_POSITION_LIMITS = (
     (-2.8, 2.8),
@@ -91,6 +96,7 @@ class AgingRuntime:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._temp_limit_c: float | None = None
+        self._following_error_count = 0
         self._status: dict[str, Any] = {
             "available": bool(settings.allow_aging_write),
             "status": "inactive",
@@ -423,8 +429,16 @@ class AgingRuntime:
 
     def _send(self, target: Sequence[float], velocity_limits: Sequence[float]) -> None:
         positions = self._fresh_positions(check_status=True)
-        if max(abs(positions[i] - float(target[i])) for i in range(7)) > FOLLOWING_ERROR_RAD:
-            raise AgingSafetyFault("following error exceeded 0.5 rad")
+        error = max(abs(positions[i] - float(target[i])) for i in range(7))
+        if error > FOLLOWING_ERROR_RAD:
+            self._following_error_count += 1
+            if self._following_error_count >= FOLLOWING_ERROR_CONSECUTIVE_LIMIT:
+                raise AgingSafetyFault(
+                    f"following error exceeded {FOLLOWING_ERROR_RAD} rad "
+                    f"({self._following_error_count} consecutive frames, max {error:.3f})"
+                )
+            return  # skip this frame, the arm will catch up
+        self._following_error_count = 0
         self._service.send_aging_positions(target, velocity_limits)
 
     def _fresh_positions(self, *, check_status: bool) -> list[float]:
