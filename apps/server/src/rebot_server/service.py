@@ -332,13 +332,19 @@ class ScanService:
                 self._release_if_pending()
 
     def send_aging_positions(
-        self, positions: Sequence[float], velocity_limits: Sequence[float]
+        self,
+        positions: Sequence[float],
+        velocity_limits: Sequence[float],
+        gravity_torque: Sequence[float] | None = None,
     ) -> None:
         """Send one aging MIT sample without creating another Controller.
 
         ``velocity_limits`` is retained for call-site compatibility; MIT mode
         has no velocity-limit parameter (the trajectory is already retimed at a
         bounded fixed speed before it reaches the aging runtime).
+
+        ``gravity_torque``, when provided, is passed as the torque feedforward
+        (tau_ff) argument of each MIT frame to compensate for gravity.
         """
         with self._aging_state_lock:
             if not self._aging_motion_active:
@@ -351,7 +357,7 @@ class ScanService:
             send = getattr(self._scanner, "send_aging_mit", None)
             if not callable(send):
                 raise ServiceOperationError("aging MIT sender is not available")
-            send(positions)
+            send(positions, gravity_torque)
         except ServiceOperationError:
             raise
         except Exception as exc:

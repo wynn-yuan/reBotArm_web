@@ -10,6 +10,7 @@ from .aging_logs import AgingLogStore
 from .aging_recorder import AgingRecorder
 from .aging_runtime import AgingRuntime
 from .config import ADAPTER_MOTORBRIDGE, Settings, load_settings
+from .gravity import GravityModel
 from .scanners import create_scanner
 from .scanners.base import CanScanner
 from .scanners.motorbridge import (
@@ -91,7 +92,47 @@ def create_app(
         trajectory_root=settings.trajectory_dir,
     )
     aging_recorder = AgingRecorder(aging_log_store)
-    aging_runtime = AgingRuntime(settings, service, aging_recorder)
+
+    # Gravity compensation: only instantiate when enabled and the URDF is
+    # available.  Failures are logged but never prevent server startup (fail
+    # open for the model — the torque feedforward simply stays 0).
+    gravity_model = None
+    if settings.gravity_compensation_enable:
+        import os as _os
+        import sys as _sys
+
+        urdf_path = _os.environ.get("REBOT_URDF_PATH", "")
+        if not urdf_path:
+            urdf_path = _os.path.join(
+                _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.dirname(__file__)))),
+                "packages",
+                "robot-description",
+                "public",
+                "robots",
+                "rebot-b601-rs",
+                "model.urdf",
+            )
+        if not _os.path.isfile(urdf_path):
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "gravity compensation enabled but URDF not found at %s; "
+                "gravity torque will be 0",
+                urdf_path,
+            )
+        else:
+            try:
+                gravity_model = GravityModel(
+                    urdf_path,
+                    compensation_factors=settings.gravity_compensation_factor,
+                )
+            except Exception as _exc:
+                import logging as _logging
+                _logging.getLogger(__name__).warning(
+                    "failed to load gravity model: %s; gravity torque will be 0",
+                    _exc,
+                )
+
+    aging_runtime = AgingRuntime(settings, service, aging_recorder, gravity_model)
     telemetry_hub = MotorbridgeTelemetryHub(
         settings, service, frame_sink=aging_runtime.accept_frame
     )

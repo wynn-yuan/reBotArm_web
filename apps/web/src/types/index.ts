@@ -55,6 +55,15 @@ export interface TelemetrySnapshot {
 }
 
 // ===== 已录动作 =====
+
+/** 带录制时间戳的单帧采样（相对于录制开始，单位秒） */
+export interface TimedSample {
+  /** 相对录制开始的时间偏移（秒） */
+  t: number;
+  /** 7 个关节位置（rad） */
+  positions: number[];
+}
+
 export interface RecordedAction {
   id: string;
   name: string;
@@ -65,6 +74,11 @@ export interface RecordedAction {
   jointCount: number;     // 一般 7
   // 简化存储：每个关节是一段归一化后的轨迹
   trails: number[][];     // [joint][sample]
+  /**
+   * 带时间戳的原始采样（仅 raw 版本有）。
+   * 用于轨迹处理时保留原始录制的运动速度信息。
+   */
+  timedSamples?: TimedSample[];
   /** raw never changes; processed is a separately saved offline derivative. */
   version?: 'raw' | 'processed' | 'seed';
   rawActionId?: string;
@@ -145,6 +159,8 @@ export interface RecordingState {
   name: string;
   samplingHz: number;
   startedAt: number;
+  /** 录制开始时的 performance.now() 基准，用于计算 TimedSample.t */
+  recordingStartTime: number | null;
   sampleCount: number;
   countdownEndsAt: number | null;
   status: 'countdown' | 'recording' | 'finishing';

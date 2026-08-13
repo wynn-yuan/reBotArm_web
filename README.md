@@ -4,10 +4,12 @@ reBot B601-RS（6 旋转关节 + 1 夹爪）机械臂的本机 Web 控制台。�
 FastAPI + motorbridge 0.5.1 后端、动作轨迹处理、真实 MIT 老化循环，以及 Jetson
 用户态部署脚本（版本化 release + 原子切换 + 回滚）。
 
-> **当前阶段（2026-08-12）**：真机 Web 控制台已上线。动作中心录制 raw → 固定速度
+> **当前阶段（2026-08-13）**：真机 Web 控制台已上线。动作中心录制 raw → 固定速度
 > 轨迹处理（自动钳制到限位内留安全余量）→ 保存到后端 **Trajectory 动作库**；老化按
 > 动作 ID 从 Trajectory 读取，以 **MIT 位置伺服模式**执行循环动作并同时记录遥测。
 > 零重力拖拽录制、机械零位、MIT 模式确认、老化周期均已人工验证通过。
+> **新增**：重力补偿功能——从 URDF 模型计算各关节重力矩，通过 MIT 扭矩前馈消除
+> 运动下垂。
 
 ## 目录树
 
@@ -99,6 +101,37 @@ python -m rebot_server                             # 启动后端（默认 127.0
   {"type":"safety_temp_exceeded","joint_id":5,"temperature_c":85.3,"limit_c":80}
   ```
 
+### 重力补偿
+
+老化执行时，MIT 电机固件接收的控制律为：
+
+```
+τ = kp·(θ_target − θ_actual) + kd·θ̇ + τ_ff
+```
+
+当 `τ_ff = 0` 时，机械臂必须靠位置误差 `kp·(θ_target − θ_actual)` 产生对抗重力
+的力矩，导致稳态下垂（sag）。重力补偿通过 URDF 模型计算各关节重力矩，将其作为
+`τ_ff` 发送给电机，从而消除位置误差。
+
+**实现**：`gravity.py` 使用 URDF 中提取的连杆质量、质心、关节几何，通过递归牛顿-
+欧拉反向递推（仅重力项，无科氏力/惯性力）计算重力矩向量。纯 Python + numpy，无
+外部依赖。
+
+**启用**（默认关闭，fail-closed）：
+
+```dotenv
+REBOT_GRAVITY_COMPENSATION_ENABLE=1
+```
+
+**调优**：J2（肩部）和 J3（肘部）最可能需要调整补偿因子：
+
+```dotenv
+REBOT_GRAVITY_COMPENSATION_FACTOR=1,1.2,1.1,1,1,1,1
+```
+
+如果关节仍然下垂 → 增大对应因子；如果向反方向漂移 → 减小因子。
+完全关闭 → 设为 `0`。
+
 ### 限位安全余量
 - 轨迹处理时把每个样本钳制到 `[下限+余量, 上限−余量]`（默认 0.05 rad），
   机械臂永远动不到限位外；录制压到机械挡块也能正常生成动作。
@@ -162,6 +195,8 @@ REBOT_LOG_LEVEL=INFO
 - `REBOT_AGING_LOG_ROOT` 由启动脚本固定为 `$BASE/log`；`REBOT_TRAJECTORY_DIR` 固定为
   `$BASE/Trajectory`，均不由 UI 选择。
 - MIT 增益可选：`REBOT_MIT_KP=50,150,150,50,50,50,50`、`REBOT_MIT_KD=3,10,10,5,4,4,4`。
+- 重力补偿可选（默认关闭）：`REBOT_GRAVITY_COMPENSATION_ENABLE=1`、补偿因子
+  `REBOT_GRAVITY_COMPENSATION_FACTOR=1,1,1,1,1,1,1`（J1..J7）。
 - 门禁为 `1` 只表示对应接口在用户确认后可调用，服务启动不自动扫描/使能/回零/动作。
 
 ## CAN 接口（PCAN-USB）

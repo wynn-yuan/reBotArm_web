@@ -85,10 +85,13 @@ def _finite(value: Any) -> bool:
 class AgingRuntime:
     """Thread-safe aging lifecycle with real motion and telemetry recording."""
 
-    def __init__(self, settings, service, recorder: AgingRecorder) -> None:
+    def __init__(
+        self, settings, service, recorder: AgingRecorder, gravity_model=None
+    ) -> None:
         self._settings = settings
         self._service = service
         self._recorder = recorder
+        self._gravity = gravity_model  # GravityModel | None
         self._lock = threading.RLock()
         self._telemetry_lock = threading.RLock()
         self._latest_frame: dict[str, Any] | None = None
@@ -439,7 +442,11 @@ class AgingRuntime:
                 )
             return  # skip this frame, the arm will catch up
         self._following_error_count = 0
-        self._service.send_aging_positions(target, velocity_limits)
+        # Compute gravity torque if the model is enabled.
+        gravity_torque: list[float] | None = None
+        if self._gravity is not None:
+            gravity_torque = self._gravity.compute(positions)
+        self._service.send_aging_positions(target, velocity_limits, gravity_torque)
 
     def _fresh_positions(self, *, check_status: bool) -> list[float]:
         with self._telemetry_lock:

@@ -583,16 +583,19 @@ class MotorbridgeCanScanner(CanScanner):
                 raise RuntimeError("motorbridge SDK lacks Motor.ensure_mode")
             call(pos_vel, 1000)
 
-    def send_aging_mit(self, positions: Sequence[float]) -> None:
+    def send_aging_mit(
+        self, positions: Sequence[float], gravity_torque: Sequence[float] | None = None
+    ) -> None:
         """Send one synchronized seven-joint MIT position-servo sample.
 
         Mirrors the reference control stack (reBotArm_control example
         ``3_mit_control.py``): MIT mode with the configured per-joint kp/kd,
-        velocity feedforward 0 and torque feedforward 0. After sending, poll
-        feedback once UNDER THE SAME BUS LOCK so the motor state cache is
-        updated immediately — the telemetry emitter can then read the fresh
-        state WITHOUT acquiring the bus lock again, eliminating the 100 Hz
-        lock contention that causes stutter.
+        velocity feedforward 0 and torque feedforward from *gravity_torque*
+        (when provided, otherwise 0). After sending, poll feedback once UNDER
+        THE SAME BUS LOCK so the motor state cache is updated immediately —
+        the telemetry emitter can then read the fresh state WITHOUT acquiring
+        the bus lock again, eliminating the 100 Hz lock contention that causes
+        stutter.
         """
         if self._controller is None or set(self._motors) != set(MOTOR_MODELS):
             raise RuntimeError("controller is not connected to all motors")
@@ -603,12 +606,17 @@ class MotorbridgeCanScanner(CanScanner):
             call = getattr(motor, "send_mit", None)
             if not callable(call):
                 raise RuntimeError("motorbridge SDK lacks Motor.send_mit")
+            tau_ff = (
+                float(gravity_torque[index])
+                if gravity_torque is not None
+                else 0.0
+            )
             call(
                 float(positions[index]),
                 0.0,
                 float(self._mit_kp[index]),
                 float(self._mit_kd[index]),
-                0.0,
+                tau_ff,
             )
         # Poll feedback once while the bus lock is still held: the motor
         # replies to every MIT frame with a status frame, so the SDK cache

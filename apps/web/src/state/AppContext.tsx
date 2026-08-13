@@ -68,6 +68,8 @@ interface AppState {
 
   // 录制采样缓冲（用于构造已录动作）
   recordingBuffer: number[][];
+  /** 带时间戳的录制采样（用于保留原始录制速度信息） */
+  recordingTimedSamples: TimedSample[];
 
   /** 机械臂连接状态（完全来自后端 /api/robot/* 返回） */
   connection: ConnectionState;
@@ -77,9 +79,9 @@ type Action =
   | { type: 'SET_MODE'; mode: ControlMode }
   | { type: 'EMERGENCY_ON' }
   | { type: 'EMERGENCY_OFF' }
-  | { type: 'RECORD_START'; payload: { name: string; samplingHz: number; countdownSec: number; now: number } }
+  | { type: 'RECORD_START'; payload: { name: string; samplingHz: number; countdownSec: number; now: number; recordingStartTime: number } }
   | { type: 'RECORD_COUNTDOWN_DONE'; payload: { now: number } }
-  | { type: 'RECORD_TICK'; payload: { now: number; sampleCount: number; sample: number[] } }
+  | { type: 'RECORD_TICK'; payload: { now: number; sampleCount: number; sample: number[]; relativeTime: number } }
   | { type: 'RECORD_STOP'; payload: { now: number; reentry: 'idle' } }
   | { type: 'PLAYBACK_START'; payload: { actionId: string; now: number; speedMultiplier: number } }
   | { type: 'AGING_START'; payload: { cfg: AgingConfig; now: number } }
@@ -189,7 +191,7 @@ function reducer(state: AppState, action: Action): AppState {
       if (state.connection.status !== 'connected') return state;
       if (state.emergencyStop || state.safety.status !== 'idle') return state;
       if (state.controlMode !== 'idle') return state;
-      const { name, samplingHz, now, countdownSec } = action.payload;
+      const { name, samplingHz, now, countdownSec, recordingStartTime } = action.payload;
       return {
         ...state,
         controlMode: 'teach_record',
@@ -200,8 +202,10 @@ function reducer(state: AppState, action: Action): AppState {
           sampleCount: 0,
           countdownEndsAt: now + countdownSec * 1000,
           status: 'countdown',
+          recordingStartTime: recordingStartTime ?? null,
         },
         recordingBuffer: Array.from({ length: 7 }, () => []),
+        recordingTimedSamples: [],
       };
     }
 
@@ -222,10 +226,13 @@ function reducer(state: AppState, action: Action): AppState {
         const v = action.payload.sample[i];
         return v === undefined ? arr : [...arr, v];
       });
+      const timedSamples = state.recordingTimedSamples ?? [];
+      const nextTimed = [...timedSamples, { t: action.payload.relativeTime, positions: [...action.payload.sample] }];
       return {
         ...state,
         recording: { ...state.recording, sampleCount: state.recording.sampleCount + 1 },
         recordingBuffer: next,
+        recordingTimedSamples: nextTimed,
       };
     }
 

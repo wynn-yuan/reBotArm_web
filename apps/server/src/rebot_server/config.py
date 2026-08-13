@@ -88,6 +88,14 @@ DEFAULT_TRAJECTORY_DIR = ""
 DEFAULT_MIT_KP = (50.0, 150.0, 150.0, 50.0, 50.0, 50.0, 50.0)
 DEFAULT_MIT_KD = (3.0, 10.0, 10.0, 5.0, 4.0, 4.0, 4.0)
 
+#: Gravity compensation: when enabled, the aging runtime computes gravity torque
+#: from the URDF model and sends it as torque feedforward (tau_ff) in each MIT
+#: frame.  Default OFF (fail closed) — existing behaviour is unchanged.
+DEFAULT_GRAVITY_COMPENSATION_ENABLE = False
+#: Per-joint gravity compensation scaling factors (J1..J7).  Joints 2 (shoulder)
+#: and 3 (elbow) are most likely to need adjustment.  Default all-1.0.
+DEFAULT_GRAVITY_COMPENSATION_FACTOR = (1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0)
+
 _VALID_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 
 
@@ -200,6 +208,10 @@ class Settings:
     #: MIT position-servo gains per joint (J1..J6 + gripper).
     mit_kp: tuple[float, ...] = DEFAULT_MIT_KP
     mit_kd: tuple[float, ...] = DEFAULT_MIT_KD
+    #: Gravity compensation enable (default OFF, fail closed).
+    gravity_compensation_enable: bool = DEFAULT_GRAVITY_COMPENSATION_ENABLE
+    #: Per-joint gravity compensation scaling factors (J1..J7, default all 1.0).
+    gravity_compensation_factor: tuple[float, ...] = DEFAULT_GRAVITY_COMPENSATION_FACTOR
     log_json: bool = True
     log_level: str = "INFO"
 
@@ -354,6 +366,16 @@ def load_settings(env: Optional[Mapping[str, str]] = None) -> Settings:
     mit_kp = _parse_mit_gains("REBOT_MIT_KP", get("REBOT_MIT_KP", ""), DEFAULT_MIT_KP)
     mit_kd = _parse_mit_gains("REBOT_MIT_KD", get("REBOT_MIT_KD", ""), DEFAULT_MIT_KD)
 
+    # Gravity compensation: default OFF (fail closed).
+    gravity_compensation_enable = _as_bool(
+        get("REBOT_GRAVITY_COMPENSATION_ENABLE", "0")
+    )
+    gravity_compensation_factor = _parse_mit_gains(
+        "REBOT_GRAVITY_COMPENSATION_FACTOR",
+        get("REBOT_GRAVITY_COMPENSATION_FACTOR", ""),
+        DEFAULT_GRAVITY_COMPENSATION_FACTOR,
+    )
+
     try:
         port = int(get("REBOT_PORT", str(DEFAULT_HTTP_PORT)))
     except ValueError:
@@ -394,6 +416,8 @@ def load_settings(env: Optional[Mapping[str, str]] = None) -> Settings:
         trajectory_dir=trajectory_dir,
         mit_kp=mit_kp,
         mit_kd=mit_kd,
+        gravity_compensation_enable=gravity_compensation_enable,
+        gravity_compensation_factor=gravity_compensation_factor,
         log_json=log_json,
         log_level=log_level,
     )
