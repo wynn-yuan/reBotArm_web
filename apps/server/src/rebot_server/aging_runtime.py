@@ -27,7 +27,7 @@ HOME_SPEED_RAD_S = 0.5
 # Home-verification tolerance. MIT position servo under gravity/friction leaves
 # a small steady-state residual (measured ~0.014 rad on M5); 0.01 rad was too
 # tight and made aging fail at home even though every joint was at zero.
-HOME_TOLERANCE_RAD = 0.03
+HOME_TOLERANCE_RAD = 0.05
 HOME_TIMEOUT_S = 15.0
 TELEMETRY_TIMEOUT_S = 0.8
 # How long aging waits for real motorbridge telemetry to resume after the

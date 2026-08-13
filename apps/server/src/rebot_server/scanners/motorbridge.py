@@ -495,6 +495,21 @@ class MotorbridgeCanScanner(CanScanner):
             raise RuntimeError("motorbridge SDK lacks disable_all")
         call()
 
+    def set_active_report(self, enabled: bool) -> None:
+        """Enable or disable active status reporting on all connected motors.
+
+        During aging motion the MIT reply frames already carry the motor state,
+        so the extra active-report stream can be turned off to reduce CAN bus
+        load.  It is re-enabled after aging finishes.
+        """
+        for motor_id in sorted(self._motors):
+            motor = self._motors[motor_id]
+            call = getattr(motor, "robstride_set_active_report", None)
+            if not callable(call):
+                raise RuntimeError("motorbridge SDK lacks robstride_set_active_report")
+            call(enabled)
+        self._active_report_ids = list(self._motors) if enabled else []
+
     def poll_feedback(self) -> None:
         if self._controller is not None:
             call = getattr(self._controller, "poll_feedback_once", None)

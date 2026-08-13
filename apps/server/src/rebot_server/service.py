@@ -316,6 +316,12 @@ class ScanService:
             disable()
             ensure()
             enable()
+            # Turn off active status reporting while aging: every MIT command
+            # already carries a reply frame with the motor state, so the extra
+            # active-report stream only adds CAN bus load and lock contention.
+            ar = getattr(self._scanner, "set_active_report", None)
+            if callable(ar):
+                ar(False)
         except Exception:
             with self._aging_state_lock:
                 self._aging_motion_active = False
@@ -371,6 +377,11 @@ class ScanService:
                 if not callable(call):
                     raise ServiceOperationError("aging cleanup lacks disable_all")
                 call()
+            # Re-enable active status reporting so the telemetry hub can
+            # receive motor state frames independently during non-aging mode.
+            ar = getattr(self._scanner, "set_active_report", None)
+            if callable(ar):
+                ar(True)
         except ServiceOperationError:
             raise
         except Exception as exc:
@@ -603,9 +614,34 @@ class ScanService:
     def read_telemetry(self, sequence: int) -> Dict[str, Any]:
         """Poll and parse feedback through the already connected owner.
 
-        This method has no control/write fallback. The only SDK interaction is
-        the receive-side ``poll_feedback_once`` and ``get_state`` parsing.
+        When aging motion is active the aging thread inline-polls after every
+        MIT send, so the SDK state cache is already fresh.  We skip the bus
+        lock and the poll entirely — the telemetry emitter reads the cached
+        state without any contention on the shared Controller.
         """
+        with self._aging_state_lock:
+            aging_active = self._aging_motion_active
+        if aging_active:
+            motors_fn = getattr(self._scanner, "telemetry_motors", None)
+            if not callable(motors_fn):
+                raise ServiceOperationError("telemetry owner is not available")
+            motors = motors_fn()
+            from .telemetry import SOURCE_MOTORBRIDGE, UNITS, joint_from_motor_state
+
+            joints = []
+            for motor_id in self._expected_ids:
+                motor = motors.get(motor_id)
+                state = motor.get_state() if motor is not None else None
+                joints.append(joint_from_motor_state(motor_id, state))
+            return {
+                "timestamp": utc_now_iso(),
+                "sequence": sequence,
+                "channel": self._channel,
+                "source": SOURCE_MOTORBRIDGE,
+                "units": dict(UNITS),
+                "joints": joints,
+            }
+
         self.acquire_bus_for_telemetry()
         try:
             poll = getattr(self._scanner, "poll_feedback", None)

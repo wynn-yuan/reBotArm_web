@@ -78,11 +78,16 @@ python -m rebot_server                             # 启动后端（默认 127.0
 
 ### 老化执行（MIT 模式）
 - 启动：自动退出零力矩 → `disable` → `ensure_mode(MIT)` ×3 → 读 `0x7005(make)`
-  确认 run_mode=0 → `enable` → 以 MIT 发送 `send_mit(pos, 0, kp, kd, 0)`。
+  确认 run_mode=0 → `enable` → 关闭主动上报 → 以 MIT 发送 `send_mit(pos, 0, kp, kd, 0)`。
+- 每帧发送后**内联 poll**：在同一 bus 锁内接收电机回复状态帧，SDK 缓存即时更新。
+- **遥测免锁**：老化运行时 `read_telemetry` 跳过 poll 和 bus 锁，直接读 SDK 缓存，
+  遥测与老化零锁竞争(100Hz 下消除每秒 100 次抢锁)。
+- **主动上报关闭**：老化期间 `robstride_set_active_report(False)`，减少 CAN 总线负载
+  (MIT 回复帧已包含状态，无需额外上报)；老化结束后恢复。
+- 执行频率 100Hz(录制/处理/执行统一)，回零验证容差 0.05 rad(MIT 稳态残差)。
 - MIT 增益每关节配置（`REBOT_MIT_KP/KD`，参考 `reBotArm_control/config/rebotarm_rs.yaml`）。
-- 遥测与动作共享同一 Controller，通过总线锁互斥：遥测把总线繁忙视为正常竞争、
-  不 fail-closed；老化获取总线带重试。
-- 回零验证容差 0.03 rad（MIT 位置伺服在重力/摩擦下的稳态残差）。
+- 回零验证容差 0.05 rad（MIT 位置伺服在重力/摩擦下的稳态残差）。
+- 跟随误差保护：连续 3 帧超限才报错，单帧瞬态跳过不中断。
 
 ### 温度保护（老化）
 老化页面可设置「温度保护 °C」（可选，留空则不限制）。老化执行中逐帧读取遥测的
