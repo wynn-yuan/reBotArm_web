@@ -573,8 +573,11 @@ class MotorbridgeCanScanner(CanScanner):
 
         Mirrors the reference control stack (reBotArm_control example
         ``3_mit_control.py``): MIT mode with the configured per-joint kp/kd,
-        velocity feedforward 0 and torque feedforward 0. The arm is enabled and
-        switched to MIT by ``ensure_mit_mode`` before the first sample.
+        velocity feedforward 0 and torque feedforward 0. After sending, poll
+        feedback once UNDER THE SAME BUS LOCK so the motor state cache is
+        updated immediately — the telemetry emitter can then read the fresh
+        state WITHOUT acquiring the bus lock again, eliminating the 100 Hz
+        lock contention that causes stutter.
         """
         if self._controller is None or set(self._motors) != set(MOTOR_MODELS):
             raise RuntimeError("controller is not connected to all motors")
@@ -592,6 +595,13 @@ class MotorbridgeCanScanner(CanScanner):
                 float(self._mit_kd[index]),
                 0.0,
             )
+        # Poll feedback once while the bus lock is still held: the motor
+        # replies to every MIT frame with a status frame, so the SDK cache
+        # is updated immediately.  The telemetry emitter can then build its
+        # next frame from this fresh cache without acquiring the bus lock.
+        poll = getattr(self._controller, "poll_feedback_once", None)
+        if callable(poll):
+            poll()
 
     def write_persistent_gains(self, changes: Sequence[Dict[str, float]]) -> Dict[str, Any]:
         """Write verified RobStride persistent LocKp/SpdKp values.
