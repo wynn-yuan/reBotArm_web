@@ -41,7 +41,7 @@ def action(samples=2):
         "id": "processed-1",
         "name": "test",
         "version": "processed",
-        "samplingHz": 50,
+        "samplingHz": 100,
         "jointCount": 7,
         "trails": [[0.0] * samples for _ in range(7)],
         "processing": {

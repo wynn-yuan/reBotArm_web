@@ -11,7 +11,9 @@ import { retimeTrajectory, type TrajectoryRetimeResult } from '../../motion/traj
 import { URDF_REVOLUTE_LIMITS } from '../../telemetry/jointTransform';
 import type { ControlMode, LiveJoint, RecordedAction, RecordConfig } from '../../types';
 
-export const RECORDING_FREQUENCY = 50;
+export const RECORDING_FREQUENCY = 100;
+/** 关键点简化容差(关节空间欧氏距离,rad):保留关键目标位置,剔除中间频繁摆动 */
+export const KEYPOINT_EPSILON = 0.05;
 export const JOINT_LABELS = ['J1 基座', 'J2 肩部', 'J3 肘部', 'J4 腕滚', 'J5 腕俯', 'J6 腕转', 'J7 夹爪'];
 export const ACTION_JOINT_LIMITS = [
   URDF_REVOLUTE_LIMITS.joint1,
@@ -129,6 +131,7 @@ export function MotionCenterPage() {
   const [velocities, setVelocities] = useState(makeDefaultVelocities);
   const [targetProgressSpeed, setTargetProgressSpeed] = useState(0.8);
   const [maxAcceleration, setMaxAcceleration] = useState(1.5);
+  const [overallSpeed, setOverallSpeed] = useState(1);
   const [retimeResult, setRetimeResult] = useState<TrajectoryRetimeResult | null>(null);
   const [retimeError, setRetimeError] = useState<string | null>(null);
   const [previewProgress, setPreviewProgress] = useState(0);
@@ -254,6 +257,9 @@ export function MotionCenterPage() {
         maxAcceleration,
         outputFrequency: RECORDING_FREQUENCY,
         jointLimits: ACTION_JOINT_LIMITS,
+        overallSpeedScale: overallSpeed,
+        // 关键点模式:保留关键目标位置及其录制时间,其间按控制频率匀速重建
+        keypointEpsilon: KEYPOINT_EPSILON,
       });
       setRetimeError(null);
       setRetimeResult(result);
@@ -301,7 +307,7 @@ export function MotionCenterPage() {
                 <input id="motion-name" className="input" value={actionName} disabled={isRecording} onChange={(event) => setActionName(event.target.value)} placeholder="例如：抓取-抬升-放置" />
               </div>
               <div className="motion-center__form-grid">
-                <div className="field"><label className="field-label" htmlFor="motion-frequency">采样频率</label><input id="motion-frequency" className="input" value="50 Hz" readOnly /></div>
+                <div className="field"><label className="field-label" htmlFor="motion-frequency">采样频率</label><input id="motion-frequency" className="input" value={`${RECORDING_FREQUENCY} Hz`} readOnly /></div>
                 <div className="field"><label className="field-label" htmlFor="motion-countdown">倒计时</label><select id="motion-countdown" className="select" value={countdownSec} disabled={isRecording} onChange={(event) => setCountdownSec(Number(event.target.value))}><option value={0}>立即开始</option><option value={3}>3 s</option><option value={5}>5 s</option></select></div>
               </div>
               {!isRecording ? (
@@ -325,8 +331,10 @@ export function MotionCenterPage() {
               <div className="motion-center__form-grid">
                 <div className="field"><label className="field-label" htmlFor="progress-speed">整体目标进度速度</label><div className="motion-center__number-input"><input id="progress-speed" className="input" type="number" min="0.01" step="0.05" value={targetProgressSpeed} onChange={(event) => setTargetProgressSpeed(Number(event.target.value))} /><span>1/s</span></div></div>
                 <div className="field"><label className="field-label" htmlFor="max-acceleration">最大加速度</label><div className="motion-center__number-input"><input id="max-acceleration" className="input" type="number" min="0.01" step="0.05" value={maxAcceleration} onChange={(event) => setMaxAcceleration(Number(event.target.value))} /><span>1/s²</span></div></div>
+                <div className="field"><label className="field-label" htmlFor="overall-speed">整体速度比例</label><div className="motion-center__number-input"><input id="overall-speed" className="input" type="number" min="0.1" max="2" step="0.05" value={overallSpeed} onChange={(event) => setOverallSpeed(Number(event.target.value))} /><span>×</span></div></div>
               </div>
-              <div className="kv"><span className="kv__k">输出频率</span><span className="kv__v mono">50 Hz（固定）</span></div>
+              <div className="field-hint">整体速度比例整体调速（0.5×=慢一半，2×=快一倍）。轨迹已开启「关键点模式」：自动简化到关键目标位置，各关键点间按录制时长匀速过渡，中间不保留录制时的频繁摆动。</div>
+              <div className="kv"><span className="kv__k">输出频率</span><span className="kv__v mono">{RECORDING_FREQUENCY} Hz（固定）</span></div>
               <button className="btn btn--primary" disabled={!selectedRaw} onClick={handleProcess}><Play size={14} /> 计算轨迹处理</button>
               {retimeError && <div className="motion-center__error" role="alert">{retimeError}</div>}
               {retimeResult && <RetimeSummary raw={selectedRaw} result={retimeResult} limits={limitDiagnostics} onSave={handleSaveProcessed} />}

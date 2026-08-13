@@ -8,6 +8,7 @@ checks and CSV recording.
 
 from __future__ import annotations
 
+import logging
 import math
 import threading
 import time
@@ -17,8 +18,10 @@ from .aging_recorder import AgingRecorder
 from .config import ADAPTER_MOTORBRIDGE
 from .models import utc_now_iso
 
+logger = logging.getLogger(__name__)
 
-CONTROL_HZ = 50.0
+
+CONTROL_HZ = 100.0
 CONTROL_PERIOD_S = 1.0 / CONTROL_HZ
 HOME_SPEED_RAD_S = 0.5
 # Home-verification tolerance. MIT position servo under gravity/friction leaves
@@ -282,10 +285,12 @@ class AgingRuntime:
             final_phase = "held"
             error = str(exc)
             disable = False
+            logger.error("aging cycle held: %s", error)
         except Exception as exc:
             final_status = "error"
             final_phase = "failed"
             error = f"{type(exc).__name__}: {exc}"
+            logger.error("aging cycle failed: %s", error)
             try:
                 self._fresh_positions(check_status=False)
                 self._set_phase("fault_homing")
@@ -297,6 +302,7 @@ class AgingRuntime:
                 disable = False
             except Exception as cleanup_exc:
                 error = f"{error}; cleanup: {type(cleanup_exc).__name__}: {cleanup_exc}"
+                logger.error("aging cleanup failed: %s", cleanup_exc)
         finally:
             try:
                 self._service.finish_aging_motion(disable=disable)
@@ -517,7 +523,7 @@ class AgingRuntime:
                 raise AgingValidationError(f"joint {joint + 1} exceeds its position limit")
         sampling_hz = action.get("samplingHz")
         if not _finite(sampling_hz) or abs(float(sampling_hz) - CONTROL_HZ) > 1e-6:
-            raise AgingValidationError("processed action must be sampled at 50 Hz")
+            raise AgingValidationError("processed action must be sampled at 100 Hz")
         processing = action.get("processing")
         velocity_limits = processing.get("maxJointVelocity") if isinstance(processing, Mapping) else None
         if (

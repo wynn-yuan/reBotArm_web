@@ -88,7 +88,7 @@ describe('fixed-speed trajectory retiming', () => {
       ...options({ maxProgressSpeed: 1, targetSpeed: 1, maxAcceleration: 2 }),
     });
 
-    const dt = 1 / 50;
+    const dt = 1 / (result.diagnostics.outputFrequency);
     const velocities = result.trails[0].slice(1).map((value, i) =>
       (value - result.trails[0][i]) / dt,
     );
@@ -100,24 +100,96 @@ describe('fixed-speed trajectory retiming', () => {
     expect(Math.max(...accelerations.map(Math.abs))).toBeLessThanOrEqual(2 + 1e-8);
   });
 
-  it('emits fixed 50 Hz samples by default', () => {
+  it('emits at the default output frequency', () => {
     const result = retimeTrajectory({
       trails: [[0, 0.1]],
       ...options({ maxProgressSpeed: 1, targetSpeed: 1, maxAcceleration: 1, outputFrequency: undefined }),
     });
 
-    expect(result.sampleCount).toBe(Math.round(result.duration * 50) + 1);
+    expect(result.sampleCount).toBe(Math.round(result.duration * 100) + 1);
     expect(result.trails[0]).toHaveLength(result.sampleCount);
   });
 
   it('removes repeated points without changing the input', () => {
     const input = [[0, 0, 1, 1, 2]];
     const snapshot = structuredClone(input);
-    const result = retimeTrajectory({ trails: input, ...options({ maxProgressSpeed: 1, targetSpeed: 1 }) });
+    // smoothing:false isolates the dedup logic from the built-in smoothing.
+    const result = retimeTrajectory({ trails: input, ...options({ maxProgressSpeed: 1, targetSpeed: 1, smoothing: false }) });
 
     expect(result.diagnostics.removedDuplicatePoints).toBe(2);
     expect(result.diagnostics.retainedPathPoints).toBe(3);
     expect(input).toEqual(snapshot);
+  });
+
+  it('smooths trails by default without modifying the input', () => {
+    const input = [[0, 0, 1, 1, 2]];
+    const snapshot = structuredClone(input);
+    const result = retimeTrajectory({ trails: input, ...options({ maxProgressSpeed: 1, targetSpeed: 1 }) });
+    // Default smoothing runs: the smoothed path is gentler than the raw spikes.
+    expect(result.diagnostics.removedDuplicatePoints).toBeLessThan(2);
+    expect(input).toEqual(snapshot);
+    // A fully constant trail stays constant under smoothing.
+    const flat = retimeTrajectory({
+      trails: [[0.3, 0.3, 0.3, 0.3]],
+      ...options({ maxJointVelocity: [1], maxProgressSpeed: 1, targetSpeed: 1 }),
+    });
+    for (const v of flat.trails[0]) expect(v).toBeCloseTo(0.3, 9);
+  });
+
+  it('keypoint mode keeps recorded segment times and drops wobble', () => {
+    // 6 samples (0.5 s of motion @10 Hz) of rapid up/down wobble around zero.
+    const input = [[0, 0.1, -0.1, 0.1, -0.1, 0]];
+    const result = retimeTrajectory({
+      trails: input,
+      ...options({
+        samplingHz: 10,
+        maxJointVelocity: [10],
+        maxProgressSpeed: 10,
+        targetSpeed: 10,
+        maxAcceleration: 100,
+        keypointEpsilon: 0.2,
+        smoothing: false,
+      }),
+    });
+    // Wobble is within epsilon of the start-end line, so it reduces to the two
+    // end keypoints; the segment time is the ORIGINAL recorded delta (5/10 s),
+    // not compressed, so the output duration is preserved.
+    expect(result.diagnostics.retainedPathPoints).toBe(2);
+    expect(result.duration).toBeGreaterThanOrEqual(0.5);
+    expect(result.duration).toBeCloseTo(0.5, 0);
+    for (const value of result.trails[0]) {
+      expect(Math.abs(value)).toBeLessThan(1e-9);
+    }
+  });
+
+  it('keypoint epsilon keeps significant poses', () => {
+    // 3 samples → 2 control points (first + last) with spacing 10.
+    const input = [[0, 1, 0]];
+    const result = retimeTrajectory({
+      trails: input,
+      ...options({
+        maxJointVelocity: [10],
+        maxProgressSpeed: 10,
+        targetSpeed: 10,
+        maxAcceleration: 100,
+        keypointEpsilon: 0.01,
+      }),
+    });
+    expect(result.diagnostics.retainedPathPoints).toBe(2);
+  });
+
+  it('overall speed scale changes the effective speed', () => {
+    // Generous joint velocity so the speed scale is not capped by limits.
+    const common = { maxProgressSpeed: 10, targetSpeed: 1, maxJointVelocity: [10], maxAcceleration: 100 };
+    const base = retimeTrajectory({ trails: [[0, 1]], ...options(common) });
+    const fast = retimeTrajectory({ trails: [[0, 1]], ...options({ ...common, overallSpeedScale: 2 }) });
+    const slow = retimeTrajectory({ trails: [[0, 1]], ...options({ ...common, overallSpeedScale: 0.5 }) });
+    expect(fast.duration).toBeLessThan(base.duration);
+    expect(slow.duration).toBeGreaterThan(base.duration);
+    expect(() => retimeTrajectory({
+      trails: [[0, 1]],
+      ...options({ ...common, overallSpeedScale: 0 }),
+    })).toThrow(/overallSpeedScale/);
   });
 
   it('clamps out-of-limit samples into the safe band instead of rejecting', () => {
