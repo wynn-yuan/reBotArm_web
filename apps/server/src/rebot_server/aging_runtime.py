@@ -100,6 +100,7 @@ class AgingRuntime:
         self._thread: threading.Thread | None = None
         self._temp_limit_c: float | None = None
         self._following_error_count = 0
+        self._run_started_at = 0.0  # time.monotonic() when the aging thread starts
         self._status: dict[str, Any] = {
             "available": bool(settings.allow_aging_write),
             "status": "inactive",
@@ -146,6 +147,9 @@ class AgingRuntime:
     def status(self) -> dict[str, Any]:
         with self._lock:
             result = dict(self._status)
+            # 运行时实时计算已老化时间，不依赖循环更新
+            if result["started_at"] is not None and result["status"] in {"starting", "running", "stopping"}:
+                result["elapsed_seconds"] = time.monotonic() - self._run_started_at
         recording = self._recorder.status()
         result.update(
             available=self.available,
@@ -199,6 +203,7 @@ class AgingRuntime:
                 processed_action=dict(action),
             )
             self._service.begin_aging_motion()
+            self._run_started_at = time.monotonic()
             thread = threading.Thread(
                 target=self._run,
                 args=(normalized_action, normalized_config),
