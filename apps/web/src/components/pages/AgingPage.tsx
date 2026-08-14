@@ -9,7 +9,7 @@ import {
   type AgingLogStatus,
   type AgingRecordingStatus,
 } from '../../api/client';
-import { formatClock, formatDuration } from '../../utils/format';
+import { formatDuration } from '../../utils/format';
 import { useApp } from '../../state/AppContext';
 import { useTelemetry } from '../../state/TelemetryContext';
 import { ConfirmDialog } from '../common/ConfirmDialog';
@@ -37,6 +37,7 @@ const EMPTY_STATUS: AgingRecordingStatus = {
   recording_error: null,
   temp_limit_c: null,
   temp_protection: null,
+  elapsed_seconds: null,
 };
 
 const PHASE_LABELS: Record<string, string> = {
@@ -125,7 +126,7 @@ export function AgingPage() {
           result: 'success',
           title: '老化完成',
           detail: `已完成 ${status.completed_rounds ?? 0} 轮，耗时 ${status.elapsed_seconds != null ? Math.round(status.elapsed_seconds) : '?'} 秒`,
-          meta: { completed_rounds: status.completed_rounds, elapsed_seconds: status.elapsed_seconds },
+          meta: { completed_rounds: status.completed_rounds, elapsed_seconds: status.elapsed_seconds ?? 0 },
         });
       }
       prevPhaseRef.current = status.phase ?? 'idle';

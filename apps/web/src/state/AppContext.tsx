@@ -22,6 +22,7 @@ import type {
   RecordConfig,
   RecordingState,
   RobotConnection,
+  TimedSample,
   ZeroTorqueStatus,
   SafetyState,
   SafetyTrigger,
@@ -560,6 +561,7 @@ const INITIAL_STATE: AppState = {
   jointParams: makeSeedJointParams(),
   zeroLastSetAt: null,
   recordingBuffer: [],
+  recordingTimedSamples: [],
   connection: INITIAL_CONNECTION,
 };
 
@@ -893,6 +895,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
           samplingHz: cfg.samplingHz,
           countdownSec: cfg.countdownSec,
           now,
+          recordingStartTime: performance.now(),
         },
       });
       pushLog({
@@ -948,7 +951,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   );
 
   const recordTick = useCallback((sample: number[]) => {
-    dispatch({ type: 'RECORD_TICK', payload: { now: Date.now(), sampleCount: 0, sample } });
+    dispatch({ type: 'RECORD_TICK', payload: { now: Date.now(), sampleCount: 0, sample, relativeTime: performance.now() } });
   }, []);
 
   const recordCountdownDone = useCallback(() => {
