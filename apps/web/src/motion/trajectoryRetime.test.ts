@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { retimeTrajectory } from './trajectoryRetime';
+import { extractKeypointIndices, retimeTrajectory } from './trajectoryRetime';
 
 const limit = (lower = -10, upper = 10) => ({ lower, upper });
 
@@ -163,7 +163,6 @@ describe('fixed-speed trajectory retiming', () => {
   });
 
   it('keypoint epsilon keeps significant poses', () => {
-    // 3 samples → 2 control points (first + last) with spacing 10.
     const input = [[0, 1, 0]];
     const result = retimeTrajectory({
       trails: input,
@@ -175,7 +174,164 @@ describe('fixed-speed trajectory retiming', () => {
         keypointEpsilon: 0.01,
       }),
     });
-    expect(result.diagnostics.retainedPathPoints).toBe(2);
+    expect(result.diagnostics.retainedPathPoints).toBe(3);
+    expect(result.diagnostics.keypointIndices).toEqual([0, 1, 2]);
+    expect(result.trails[0]).toContain(1);
+  });
+
+  it('uses geometric vertices instead of taking every Nth recorded frame', () => {
+    const points = [
+      [0, 0], [0.01, -0.01], [-0.01, 0.01],
+      [1, 1], [1.01, 0.99], [0.99, 1.01],
+      [2, 0], [2.01, 0.01], [2, 0],
+    ];
+    const indices = extractKeypointIndices(points, 0.05);
+    expect(indices).toHaveLength(3);
+    expect(indices[0]).toBe(0);
+    expect(indices.at(-1)).toBe(8);
+    expect(indices[1]).toBeGreaterThanOrEqual(3);
+    expect(indices[1]).toBeLessThanOrEqual(5);
+  });
+
+  it('generates minimum-jerk segments that preserve vertices and obey velocity and acceleration limits', () => {
+    const result = retimeTrajectory({
+      trails: [[0, 0.01, -0.01, 1, 0.99, 0.98, 0]],
+      ...options({
+        samplingHz: 10,
+        outputFrequency: 100,
+        maxJointVelocity: [0.8],
+        maxAcceleration: 1.2,
+        keypointEpsilon: 0.05,
+        smoothing: false,
+        preserveRecordedTiming: false,
+      }),
+    });
+    expect(result.diagnostics.keypointIndices).toEqual([0, 3, 6]);
+    expect(result.trails[0]).toContain(1);
+    expect(result.peakVelocities[0]).toBeLessThanOrEqual(0.8 + 1e-9);
+    expect(result.diagnostics.peakAccelerations?.[0]).toBeLessThanOrEqual(1.2 * 1.02);
+  });
+
+  it('can prepend and append an explicit home pose', () => {
+    const result = retimeTrajectory({
+      trails: [[0.2, 0.8]],
+      ...options({
+        maxJointVelocity: [1],
+        maxAcceleration: 2,
+        keypointEpsilon: 0.05,
+        returnHome: true,
+        homePosition: [0],
+        smoothing: false,
+      }),
+    });
+    expect(result.trails[0][0]).toBe(0);
+    expect(result.trails[0].at(-1)).toBe(0);
+    expect(Math.max(...result.trails[0])).toBeGreaterThan(0.75);
+    expect(result.diagnostics.addedHomePoints).toBe(2);
+  });
+
+  it('continuous smoothing removes a short manual jitter spike instead of treating it as a vertex', () => {
+    const spike = Array.from({ length: 21 }, () => 0);
+    spike[10] = 1;
+    const result = retimeTrajectory({
+      trails: [spike],
+      ...options({
+        samplingHz: 100,
+        outputFrequency: 100,
+        smoothingWindow: 13,
+        maxJointVelocity: [1],
+        maxAcceleration: 2,
+        preserveRecordedTiming: true,
+      }),
+    });
+    expect(Math.max(...result.trails[0].map(Math.abs))).toBeLessThan(1e-9);
+    expect(result.diagnostics.keypointIndices).toBeUndefined();
+    expect(result.diagnostics.smoothingWindowSamples).toBe(13);
+  });
+
+  it('continuous smoothing follows the recorded gesture without intermediate vertex stops', () => {
+    const result = retimeTrajectory({
+      trails: [[0, 0, 0.1, 0.3, 0.6, 0.9, 1, 1]],
+      ...options({
+        samplingHz: 10,
+        outputFrequency: 100,
+        smoothingWindow: 7,
+        maxJointVelocity: [0.8],
+        maxAcceleration: 1.2,
+        preserveRecordedTiming: false,
+      }),
+    });
+    expect(result.trails[0][0]).toBe(0);
+    expect(result.trails[0].at(-1)).toBe(1);
+    for (let index = 1; index < result.trails[0].length; index += 1) {
+      expect(result.trails[0][index]).toBeGreaterThanOrEqual(result.trails[0][index - 1] - 1e-9);
+    }
+    expect(result.peakVelocities[0]).toBeLessThanOrEqual(0.8 * 1.01 + 1e-9);
+    expect(result.diagnostics.peakAccelerations?.[0]).toBeLessThanOrEqual(1.2 * 1.02 + 1e-9);
+  });
+
+  it('does not expand a 695-frame hand-guided gesture into a very long trajectory', () => {
+    const sampleCount = 695;
+    const trail = Array.from({ length: sampleCount }, (_, index) => {
+      const progress = index / (sampleCount - 1);
+      const gesture = 0.8 * Math.sin(Math.PI * progress);
+      const handJitter = 0.012 * Math.sin(index * 2 * Math.PI / 7);
+      return gesture + handJitter;
+    });
+    trail[0] = 0;
+    trail[trail.length - 1] = 0;
+    const result = retimeTrajectory({
+      trails: [trail],
+      ...options({
+        samplingHz: 100,
+        outputFrequency: 100,
+        smoothingWindow: 13,
+        keypointEpsilon: 0.04,
+        maxKeypoints: 48,
+        maxJointVelocity: [1],
+        maxAcceleration: 1.5,
+        preserveRecordedTiming: true,
+      }),
+    });
+    expect(result.diagnostics.retainedPathPoints).toBeLessThan(20);
+    expect(result.duration).toBeLessThan(12);
+    expect(result.sampleCount).toBeLessThan(1201);
+  });
+
+  it('keeps acceleration as a soft constraint while preserving the recorded timing', () => {
+    const result = retimeTrajectory({
+      trails: [[0, 0.2, 0.65, 0.9, 1]],
+      ...options({
+        samplingHz: 20,
+        outputFrequency: 100,
+        smoothingWindow: 3,
+        keypointEpsilon: 0.02,
+        maxJointVelocity: [10],
+        maxAcceleration: 0.01,
+        preserveRecordedTiming: true,
+      }),
+    });
+    expect(result.duration).toBeLessThan(1);
+    expect(result.diagnostics.peakAccelerations?.[0]).toBeGreaterThan(0.01);
+    expect(result.diagnostics.warnings.some((warning) => warning.includes('加速度为软约束'))).toBe(true);
+  });
+
+  it('continuous smoothing can add home motion without changing the filtered gesture endpoints', () => {
+    const result = retimeTrajectory({
+      trails: [[0.2, 0.3, 0.5, 0.8]],
+      ...options({
+        samplingHz: 10,
+        outputFrequency: 100,
+        smoothingWindow: 3,
+        returnHome: true,
+        homePosition: [0],
+      }),
+    });
+    expect(result.trails[0][0]).toBe(0);
+    expect(result.trails[0].at(-1)).toBe(0);
+    expect(Math.max(...result.trails[0])).toBeGreaterThan(0.75);
+    expect(result.duration).toBeLessThan(10);
+    expect(result.diagnostics.addedHomePoints).toBe(2);
   });
 
   it('overall speed scale changes the effective speed', () => {

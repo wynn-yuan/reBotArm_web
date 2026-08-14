@@ -7,13 +7,13 @@ import { ResizablePanel } from '../common/ResizablePanel';
 import { EmptyState } from '../common/EmptyState';
 import { StatusBadge } from '../common/StatusBadge';
 import { formatClock, formatDuration } from '../../utils/format';
-import { retimeTrajectory, retimeWithTimestamps, type TrajectoryRetimeResult, type TimedRetimeResult } from '../../motion/trajectoryRetime';
+import { retimeTrajectory, type TrajectoryRetimeResult } from '../../motion/trajectoryRetime';
 import { URDF_REVOLUTE_LIMITS } from '../../telemetry/jointTransform';
 import type { ControlMode, LiveJoint, RecordedAction, RecordConfig } from '../../types';
 
 export const RECORDING_FREQUENCY = 100;
-/** 关键点简化容差(关节空间欧氏距离,rad):保留关键目标位置,剔除中间频繁摆动 */
-export const KEYPOINT_EPSILON = 0.05;
+/** 连续抗抖滤波窗口；100 Hz 下 13 帧约等于 130 ms。 */
+export const DEFAULT_SMOOTHING_WINDOW = 13;
 export const JOINT_LABELS = ['J1 基座', 'J2 肩部', 'J3 肘部', 'J4 腕滚', 'J5 腕俯', 'J6 腕转', 'J7 夹爪'];
 export const ACTION_JOINT_LIMITS = [
   URDF_REVOLUTE_LIMITS.joint1,
@@ -132,9 +132,11 @@ export function MotionCenterPage() {
   const [targetProgressSpeed, setTargetProgressSpeed] = useState(0.8);
   const [maxAcceleration, setMaxAcceleration] = useState(1.5);
   const [overallSpeed, setOverallSpeed] = useState(1);
-  const [retimeResult, setRetimeResult] = useState<TrajectoryRetimeResult | TimedRetimeResult | null>(null);
+  const [retimeResult, setRetimeResult] = useState<TrajectoryRetimeResult | null>(null);
   const [retimeError, setRetimeError] = useState<string | null>(null);
   const [preserveTiming, setPreserveTiming] = useState(true);
+  const [returnHome, setReturnHome] = useState(true);
+  const [smoothingWindow, setSmoothingWindow] = useState(DEFAULT_SMOOTHING_WINDOW);
   const [previewProgress, setPreviewProgress] = useState(0);
   const [previewPlaying, setPreviewPlaying] = useState(false);
   const [previewSpeed, setPreviewSpeed] = useState(1);
@@ -250,69 +252,37 @@ export function MotionCenterPage() {
       return;
     }
     try {
-      if (preserveTiming && selectedRaw.timedSamples && selectedRaw.timedSamples.length > 0) {
-        // 时间戳模式：保留原始录制节奏，仅在超速时拉伸时间
-        const result = retimeWithTimestamps({
-          timedSamples: selectedRaw.timedSamples,
-          maxJointVelocity: velocities,
-          outputFrequency: RECORDING_FREQUENCY,
-          overallSpeedScale: overallSpeed,
-          jointLimits: ACTION_JOINT_LIMITS,
-        });
-        setRetimeError(null);
-        setRetimeResult(result);
-      } else {
-        // 回退到原始 Catmull-Rom 模式
-        if (!selectedRaw.timedSamples || selectedRaw.timedSamples.length === 0) {
-          setRetimeError('该 raw 动作没有时间戳信息，使用 Catmull-Rom 模式处理。');
-        }
-        const result = retimeTrajectory({
-          trails: selectedRaw.trails,
-          samplingHz: selectedRaw.samplingHz,
-          maxJointVelocity: velocities,
-          maxProgressSpeed: targetProgressSpeed,
-          maxAcceleration,
-          outputFrequency: RECORDING_FREQUENCY,
-          jointLimits: ACTION_JOINT_LIMITS,
-          overallSpeedScale: overallSpeed,
-          keypointEpsilon: KEYPOINT_EPSILON,
-        });
-        setRetimeError(null);
-        setRetimeResult(result);
-      }
+      const sampleTimes = selectedRaw.timedSamples?.length === selectedRaw.sampleCount
+        ? selectedRaw.timedSamples.map((sample) => sample.t)
+        : undefined;
+      const result = retimeTrajectory({
+        trails: selectedRaw.trails,
+        samplingHz: selectedRaw.samplingHz,
+        sampleTimes,
+        maxJointVelocity: velocities,
+        maxProgressSpeed: targetProgressSpeed,
+        maxAcceleration,
+        outputFrequency: RECORDING_FREQUENCY,
+        jointLimits: ACTION_JOINT_LIMITS,
+        overallSpeedScale: overallSpeed,
+        smoothingWindow,
+        keypointEpsilon: smoothingWindow <= 7 ? 0.04 : smoothingWindow <= 13 ? 0.08 : 0.15,
+        maxKeypoints: 48,
+        preserveRecordedTiming: preserveTiming,
+        returnHome,
+        homePosition: [0, 0, 0, 0, 0, 0, 0],
+      });
+      setRetimeError(null);
+      setRetimeResult(result);
     } catch (error) {
       setRetimeResult(null);
       setRetimeError(error instanceof Error ? error.message : String(error));
     }
-  }, [maxAcceleration, preserveTiming, selectedRaw, targetProgressSpeed, velocities, overallSpeed]);
+  }, [maxAcceleration, preserveTiming, returnHome, selectedRaw, smoothingWindow, targetProgressSpeed, velocities, overallSpeed]);
 
   const handleSaveProcessed = () => {
     if (!selectedRaw || !retimeResult) return;
-    const trails = 'trails' in retimeResult ? retimeResult.trails : [];
-    const duration = 'duration' in retimeResult ? retimeResult.duration : 0;
-    const sampleCount = 'sampleCount' in retimeResult ? retimeResult.sampleCount : 0;
-    const action = createProcessedAction(selectedRaw, {
-      trails,
-      duration,
-      sampleCount,
-      peakVelocity: [],
-      peakVelocities: [],
-      diagnostics: {
-        inputJointCount: 7,
-        inputSampleCount: 0,
-        retainedPathPoints: 0,
-        removedDuplicatePoints: 0,
-        restrictedPathDuration: duration,
-        segmentDurations: [],
-        requestedTargetProgressSpeed: 0,
-        effectiveMaxProgressSpeed: 0,
-        effectiveTargetProgressSpeed: 0,
-        progressPeakSpeed: 0,
-        progressPeakAcceleration: 0,
-        outputFrequency: RECORDING_FREQUENCY,
-        warnings: [],
-      },
-    }, {
+    const action = createProcessedAction(selectedRaw, retimeResult, {
       maxJointVelocity: [...velocities],
       maxProgressSpeed: targetProgressSpeed,
       maxAcceleration,
@@ -371,14 +341,19 @@ export function MotionCenterPage() {
               </div>
               <div className="motion-center__form-grid">
                 <div className="field"><label className="field-label" htmlFor="progress-speed">整体目标进度速度</label><div className="motion-center__number-input"><input id="progress-speed" className="input" type="number" min="0.01" step="0.05" value={targetProgressSpeed} onChange={(event) => setTargetProgressSpeed(Number(event.target.value))} /><span>1/s</span></div></div>
-                <div className="field"><label className="field-label" htmlFor="max-acceleration">最大加速度</label><div className="motion-center__number-input"><input id="max-acceleration" className="input" type="number" min="0.01" step="0.05" value={maxAcceleration} onChange={(event) => setMaxAcceleration(Number(event.target.value))} /><span>1/s²</span></div></div>
+                <div className="field"><label className="field-label" htmlFor="max-acceleration">{preserveTiming ? '加速度参考值' : '关节加速度上限'}</label><div className="motion-center__number-input"><input id="max-acceleration" className="input" type="number" min="0.01" step="0.05" value={maxAcceleration} onChange={(event) => setMaxAcceleration(Number(event.target.value))} /><span>rad/s²</span></div></div>
                 <div className="field"><label className="field-label" htmlFor="overall-speed">整体速度比例</label><div className="motion-center__number-input"><input id="overall-speed" className="input" type="number" min="0.1" max="2" step="0.05" value={overallSpeed} onChange={(event) => setOverallSpeed(Number(event.target.value))} /><span>×</span></div></div>
+                <div className="field"><label className="field-label" htmlFor="smoothing-strength">抗抖强度</label><select id="smoothing-strength" className="select" value={smoothingWindow} onChange={(event) => setSmoothingWindow(Number(event.target.value))}><option value={7}>轻度（约 70 ms）</option><option value={13}>标准（约 130 ms）</option><option value={21}>强力（约 210 ms）</option></select></div>
               </div>
               <label className="field field--checkbox">
                 <input type="checkbox" checked={preserveTiming} onChange={(event) => setPreserveTiming(event.target.checked)} />
-                <span>保留原始录制速度（推荐：仅超速时拉伸时间，不删帧）</span>
+                <span>保留示教节奏（速度为硬限制，加速度仅提示，仅在超速时延长）</span>
               </label>
-              <div className="field-hint">整体速度比例整体调速（0.5×=慢一半，2×=快一倍）。关闭「保留原始速度」将使用 Catmull-Rom 样条平滑。</div>
+              <label className="field field--checkbox">
+                <input type="checkbox" checked={returnHome} onChange={(event) => setReturnHome(event.target.checked)} />
+                <span>自动补全首尾回零动作</span>
+              </label>
+              <div className="field-hint">算法会先去除瞬时尖峰，再把滤波曲线简化成少量形状控制点并连续插值。控制点不会造成中途停顿；如需严格限制加速度，请关闭“保留示教节奏”。</div>
               <div className="kv"><span className="kv__k">输出频率</span><span className="kv__v mono">{RECORDING_FREQUENCY} Hz（固定）</span></div>
               <button className="btn btn--primary" disabled={!selectedRaw} onClick={handleProcess}><Play size={14} /> 计算轨迹处理</button>
               {retimeError && <div className="motion-center__error" role="alert">{retimeError}</div>}
@@ -415,16 +390,17 @@ export function MotionCenterPage() {
   );
 }
 
-function RetimeSummary({ raw, result, limits, onSave }: { raw: RecordedAction | null; result: TrajectoryRetimeResult | TimedRetimeResult; limits: JointLimitDiagnostic[]; onSave: () => void }) {
-  const warnings = 'warnings' in result ? result.warnings : result.diagnostics.warnings;
-  const peakVelocities = 'peakVelocities' in result ? result.peakVelocities : [];
-  const stretchedSegments = 'stretchedSegments' in result ? result.stretchedSegments : 0;
-  const originalDuration = 'originalDuration' in result ? result.originalDuration : 0;
+function RetimeSummary({ raw, result, limits, onSave }: { raw: RecordedAction | null; result: TrajectoryRetimeResult; limits: JointLimitDiagnostic[]; onSave: () => void }) {
+  const warnings = result.diagnostics.warnings;
+  const peakVelocities = result.peakVelocities;
+  const originalDuration = (raw?.durationMs ?? 0) / 1000;
 
   return <div className="motion-center__result" aria-live="polite"><div className="motion-center__result-head"><b>处理诊断</b><button className="btn btn--primary btn--sm" onClick={onSave}><Save size={12} /> 保存 processed</button></div><div className="motion-center__metrics">
     <span>原始时长 <b>{formatDuration(originalDuration * 1000 || (raw?.durationMs ?? 0))}</b></span>
     <span>处理后 <b>{formatDuration(result.duration * 1000)}</b></span>
     <span>样本 <b>{raw?.sampleCount ?? 0} → {result.sampleCount}</b></span>
-    {stretchedSegments > 0 && <span>拉伸片段 <b>{stretchedSegments}</b></span>}
+    {(result.diagnostics.smoothingWindowSamples ?? 0) > 0 && <span>抗抖窗口 <b>{result.diagnostics.smoothingWindowSamples} 帧</b></span>}
+    {(result.diagnostics.smoothingWindowSamples ?? 0) > 0 && <span>形状控制点 <b>{result.diagnostics.retainedPathPoints}</b></span>}
+    {(result.diagnostics.addedHomePoints ?? 0) > 0 && <span>回零段 <b>{result.diagnostics.addedHomePoints}</b></span>}
   </div><div className="motion-center__peaks"><b>各关节峰值速度</b>{peakVelocities.map((peak, joint) => <span key={JOINT_LABELS[joint]}>{JOINT_LABELS[joint]} <em>{peak.toFixed(3)} rad/s</em></span>)}</div><div className="motion-center__limits"><b>限位诊断</b>{limits.map((diagnostic) => <span key={diagnostic.joint} className={diagnostic.inLimit ? 'motion-center__limit-ok' : 'motion-center__limit-bad'}>{diagnostic.joint}: {diagnostic.inLimit ? '通过' : '超限'} ({diagnostic.min?.toFixed(3) ?? '—'} … {diagnostic.max?.toFixed(3) ?? '—'})</span>)}</div>{warnings.length > 0 && <div className="field-hint">提示：{warnings.join('；')}</div>}</div>;
 }

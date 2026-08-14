@@ -228,7 +228,10 @@ function reducer(state: AppState, action: Action): AppState {
         return v === undefined ? arr : [...arr, v];
       });
       const timedSamples = state.recordingTimedSamples ?? [];
-      const nextTimed = [...timedSamples, { t: action.payload.relativeTime, positions: [...action.payload.sample] }];
+      // performance.now() 是毫秒，TimedSample.t 需要秒
+      const baseTime = state.recording.recordingStartTime ?? action.payload.relativeTime;
+      const relativeTimeSec = (action.payload.relativeTime - baseTime) / 1000;
+      const nextTimed = [...timedSamples, { t: relativeTimeSec, positions: [...action.payload.sample] }];
       return {
         ...state,
         recording: { ...state.recording, sampleCount: state.recording.sampleCount + 1 },
@@ -244,6 +247,7 @@ function reducer(state: AppState, action: Action): AppState {
         recording: null,
         controlMode: 'idle',
         recordingBuffer: [],
+        recordingTimedSamples: [],
       };
     }
 
@@ -918,10 +922,15 @@ export function AppProvider({ children }: { children: ReactNode }) {
       const hasCompleteBuffer = recordingBuffer.length === 7 && recordingBuffer.every((trail) => trail.length > 0);
       if (commit && recording.status === 'recording' && hasCompleteBuffer) {
         const sampleCount = recordingBuffer[0].length;
-        const durationMs = (sampleCount / recording.samplingHz) * 1000;
         const timedSamples = state.recordingTimedSamples.length > 0
           ? state.recordingTimedSamples.map((ts) => ({ ...ts }))
           : undefined;
+        const timedDurationMs = timedSamples && timedSamples.length > 1
+          ? Math.max(0, timedSamples[timedSamples.length - 1].t - timedSamples[0].t) * 1000
+          : 0;
+        const durationMs = timedDurationMs > 0
+          ? timedDurationMs
+          : Math.max(0, sampleCount - 1) / recording.samplingHz * 1000;
         const newAction: RecordedAction = {
           id: makeId('act'),
           name: recording.name,
