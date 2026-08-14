@@ -66,6 +66,13 @@ export REBOT_AGING_LOG_ROOT
 # The UI reads/writes actions only through this deployment-owned directory.
 REBOT_TRAJECTORY_DIR="$TRAJECTORY_DIR"
 export REBOT_TRAJECTORY_DIR
+# Gravity compensation URDF model: always points to the CURRENT release's
+# pre-built web dist (same as REBOT_WEB_DIST_DIR).  The operator can override
+# via REBOT_URDF_PATH in the env file.
+if [ -z "${REBOT_URDF_PATH:-}" ]; then
+    REBOT_URDF_PATH="$BASE/current/web/dist/robots/rebot-b601-rs/model.urdf"
+    export REBOT_URDF_PATH
+fi
 
 PORT="${REBOT_PORT:-8000}"
 HOST="${REBOT_HOST:-127.0.0.1}"

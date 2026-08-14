@@ -103,7 +103,8 @@ def create_app(
 
         urdf_path = _os.environ.get("REBOT_URDF_PATH", "")
         if not urdf_path:
-            urdf_path = _os.path.join(
+            # 开发环境路径
+            dev_path = _os.path.join(
                 _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.dirname(__file__)))),
                 "packages",
                 "robot-description",
@@ -112,6 +113,16 @@ def create_app(
                 "rebot-b601-rs",
                 "model.urdf",
             )
+            # 部署环境路径（Jetson: current/web/dist/robots/...）
+            deploy_path = _os.path.join(
+                _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.dirname(__file__)))),
+                "web",
+                "dist",
+                "robots",
+                "rebot-b601-rs",
+                "model.urdf",
+            )
+            urdf_path = dev_path if _os.path.isfile(dev_path) else deploy_path
         if not _os.path.isfile(urdf_path):
             import logging as _logging
             _logging.getLogger(__name__).warning(
