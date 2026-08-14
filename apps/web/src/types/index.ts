@@ -184,6 +184,8 @@ export interface AgingState {
   totalLoops: number;        // loopMode === 'count' 时生效；infinite 时为 0
   endAt: number | null;      // loopMode === 'duration' 时生效；infinite 时为 null
   status: 'running' | 'paused' | 'finishing';
+  /** 已老化时间（秒），由 agingTick 更新 */
+  elapsedSeconds: number;
 }
 
 // ===== 机械臂连接（真实后端 API） =====

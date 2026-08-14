@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Play, RefreshCw, Square } from 'lucide-react';
 import {
   getAgingLogStatus,
@@ -9,6 +9,7 @@ import {
   type AgingLogStatus,
   type AgingRecordingStatus,
 } from '../../api/client';
+import { formatClock, formatDuration } from '../../utils/format';
 import { useApp } from '../../state/AppContext';
 import { useTelemetry } from '../../state/TelemetryContext';
 import { ConfirmDialog } from '../common/ConfirmDialog';
@@ -55,7 +56,7 @@ const PHASE_LABELS: Record<string, string> = {
 };
 
 export function AgingPage() {
-  const { state } = useApp();
+  const { state, pushLog } = useApp();
   const { wsStatus, stale, comm } = useTelemetry();
   const processedActions = useMemo(
     () => state.recordedActions.filter((action) => action.version === 'processed' && !action.demoOnly),
@@ -73,6 +74,10 @@ export function AgingPage() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmAction, setConfirmAction] = useState<'start' | 'stop' | null>(null);
+
+  /** 跟踪上一次轮询到的错误，用于检测新错误时 pushLog */
+  const prevErrorRef = useRef<string | null>(null);
+  const prevPhaseRef = useRef<string>('idle');
 
   useEffect(() => {
     if (!selectedActionId && processedActions[0]) setSelectedActionId(processedActions[0].id);
@@ -101,12 +106,35 @@ export function AgingPage() {
       setLogStatus(logs);
       setRuntime(status);
       setError(null);
+
+      // 检测后端新错误 → 推送到前端操作日志
+      const err = status.error || status.recording_error;
+      if (err && err !== prevErrorRef.current) {
+        prevErrorRef.current = err;
+        pushLog({
+          type: 'aging',
+          result: 'error',
+          title: '老化异常',
+          detail: err,
+          meta: { phase: status.phase ?? 'unknown', elapsed_seconds: status.elapsed_seconds ?? 0 },
+        });
+      }
+      if (!err && status.phase === 'completed' && prevPhaseRef.current !== 'completed') {
+        pushLog({
+          type: 'aging',
+          result: 'success',
+          title: '老化完成',
+          detail: `已完成 ${status.completed_rounds ?? 0} 轮，耗时 ${status.elapsed_seconds != null ? Math.round(status.elapsed_seconds) : '?'} 秒`,
+          meta: { completed_rounds: status.completed_rounds, elapsed_seconds: status.elapsed_seconds },
+        });
+      }
+      prevPhaseRef.current = status.phase ?? 'idle';
     } catch (err) {
       setError(toErrorMessage(err));
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [pushLog]);
 
   useEffect(() => {
     void refresh();
@@ -200,6 +228,7 @@ export function AgingPage() {
             <Row label="动作" value={runtime.action_name ?? '—'} />
             <Row label="当前轮次" value={String(runtime.round)} />
             <Row label="已完成" value={String(runtime.completed_rounds)} />
+            <Row label="已老化" value={runtime.elapsed_seconds != null ? formatDuration(runtime.elapsed_seconds * 1000) : '—'} />
             <Row label="遥测帧" value={String(runtime.frames_written)} />
             <Row label="数据行" value={String(runtime.rows_written)} />
             {runtime.temp_limit_c !== null && <Row label="温度保护" value={`${runtime.temp_limit_c} °C`} />}

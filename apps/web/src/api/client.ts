@@ -91,6 +91,8 @@ export interface AgingRecordingStatus {
   recording_error: string | null;
   temp_limit_c: number | null;
   temp_protection: { joint: number; temperature_c: number; limit_c: number } | null;
+  /** 已老化时间（秒），由后端运行时更新 */
+  elapsed_seconds: number | null;
 }
 
 export interface AgingStartConfig {

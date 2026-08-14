@@ -290,15 +290,17 @@ function reducer(state: AppState, action: Action): AppState {
             totalLoops,
             endAt,
             status: 'running',
+            elapsedSeconds: 0,
           },
         };
       }
 
     case 'AGING_TICK': {
       if (!state.aging) return state;
+      const elapsed = state.aging.startedAt > 0 ? (Date.now() - state.aging.startedAt) / 1000 : 0;
       return {
         ...state,
-        aging: { ...state.aging, loopsCompleted: action.payload.loopsCompleted },
+        aging: { ...state.aging, loopsCompleted: action.payload.loopsCompleted, elapsedSeconds: elapsed },
       };
     }
 

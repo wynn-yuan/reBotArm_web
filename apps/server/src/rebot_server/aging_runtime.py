@@ -116,6 +116,7 @@ class AgingRuntime:
             "temp_limit_c": None,
             "temp_protection": None,
             "error": None,
+            "elapsed_seconds": 0.0,
         }
 
     @property
@@ -184,6 +185,7 @@ class AgingRuntime:
                 temp_limit_c=self._temp_limit_c,
                 temp_protection=None,
                 error=None,
+                elapsed_seconds=0.0,
             )
 
         try:
@@ -248,6 +250,10 @@ class AgingRuntime:
         disable = True
         started = time.monotonic()
         velocity_limits = action["velocity_limits"]
+        # Update elapsed_seconds once per cycle.
+        _update_elapsed = lambda: self._set_phase(
+            self._status["phase"], elapsed_seconds=time.monotonic() - started
+        )
         try:
             self._set_phase("initial_homing")
             # Exit from zero-torque (enable->disable->enable) momentarily
@@ -257,6 +263,7 @@ class AgingRuntime:
             # arm for lack of fresh frames.
             self._wait_telemetry_ready()
             self._home()
+            _update_elapsed()
             if not self._stop.is_set():
                 self._move_smooth(action["samples"][0], velocity_limits, "positioning")
 
@@ -264,6 +271,7 @@ class AgingRuntime:
                 round_number = self.status()["completed_rounds"] + 1
                 self._set_phase("running_trajectory", round=round_number)
                 self._play(action["samples"], velocity_limits)
+                _update_elapsed()
                 # Temperature protection (or a manual stop mid-trajectory)
                 # already requested a stop; go straight to the stopping home
                 # sequence instead of returning home a second time.
@@ -276,6 +284,7 @@ class AgingRuntime:
                 with self._lock:
                     self._status["completed_rounds"] = round_number
                     self._status["updated_at"] = utc_now_iso()
+                    self._status["elapsed_seconds"] = time.monotonic() - started
 
                 if self._stop.is_set() or self._is_complete(config, round_number, started):
                     break
@@ -295,11 +304,26 @@ class AgingRuntime:
             error = str(exc)
             disable = False
             logger.error("aging cycle held: %s", error)
-        except Exception as exc:
+            self._try_append_event({
+                "type": "communication_lost",
+                "error": str(exc),
+                "phase": self._status.get("phase"),
+                "round": self._status.get("round"),
+                "elapsed_seconds": time.monotonic() - started,
+            })
+        except AgingSafetyFault as exc:
             final_status = "error"
             final_phase = "failed"
-            error = f"{type(exc).__name__}: {exc}"
-            logger.error("aging cycle failed: %s", error)
+            error = str(exc)
+            disable = True
+            logger.error("aging safety fault: %s", error)
+            self._try_append_event({
+                "type": "safety_fault",
+                "error": str(exc),
+                "phase": self._status.get("phase"),
+                "round": self._status.get("round"),
+                "elapsed_seconds": time.monotonic() - started,
+            })
             try:
                 self._fresh_positions(check_status=False)
                 self._set_phase("fault_homing")
@@ -309,6 +333,40 @@ class AgingRuntime:
                 final_status = "held"
                 final_phase = "held"
                 disable = False
+                self._try_append_event({
+                    "type": "communication_lost",
+                    "error": "fault homing failed: communication lost",
+                    "elapsed_seconds": time.monotonic() - started,
+                })
+            except Exception as cleanup_exc:
+                error = f"{error}; cleanup: {type(cleanup_exc).__name__}: {cleanup_exc}"
+                logger.error("aging cleanup failed: %s", cleanup_exc)
+        except Exception as exc:
+            final_status = "error"
+            final_phase = "failed"
+            error = f"{type(exc).__name__}: {exc}"
+            logger.error("aging cycle failed: %s", error)
+            self._try_append_event({
+                "type": "runtime_error",
+                "error": str(exc),
+                "phase": self._status.get("phase"),
+                "round": self._status.get("round"),
+                "elapsed_seconds": time.monotonic() - started,
+            })
+            try:
+                self._fresh_positions(check_status=False)
+                self._set_phase("fault_homing")
+                self._home()
+                self._verify_home()
+            except AgingCommunicationLost:
+                final_status = "held"
+                final_phase = "held"
+                disable = False
+                self._try_append_event({
+                    "type": "communication_lost",
+                    "error": "fault homing failed: communication lost",
+                    "elapsed_seconds": time.monotonic() - started,
+                })
             except Exception as cleanup_exc:
                 error = f"{error}; cleanup: {type(cleanup_exc).__name__}: {cleanup_exc}"
                 logger.error("aging cleanup failed: %s", cleanup_exc)
@@ -319,6 +377,12 @@ class AgingRuntime:
                 final_status = "error"
                 final_phase = "failed"
                 error = error or f"cleanup failed: {type(exc).__name__}: {exc}"
+            self._try_append_event({
+                "type": "stopped",
+                "status": final_status,
+                "error": error,
+                "elapsed_seconds": time.monotonic() - started,
+            })
             self._recorder.stop()
             with self._lock:
                 self._thread = None
@@ -327,6 +391,7 @@ class AgingRuntime:
                     phase=final_phase,
                     updated_at=utc_now_iso(),
                     error=error,
+                    elapsed_seconds=time.monotonic() - started,
                 )
 
     def _check_temperature(self) -> tuple[int, float, float] | None:
@@ -370,15 +435,12 @@ class AgingRuntime:
             }
         self._stop.set()
         self._set_phase("stopping")
-        try:
-            self._recorder.append_event({
-                "type": "safety_temp_exceeded",
-                "joint_id": joint_id,
-                "temperature_c": temperature,
-                "limit_c": limit,
-            })
-        except Exception:
-            pass
+        self._try_append_event({
+            "type": "safety_temp_exceeded",
+            "joint_id": joint_id,
+            "temperature_c": temperature,
+            "limit_c": limit,
+        })
 
     def _play(self, samples: Sequence[Sequence[float]], velocity_limits: Sequence[float]) -> None:
         deadline = time.monotonic()
@@ -390,6 +452,10 @@ class AgingRuntime:
                 self._trigger_temp_protection(*violation)
                 return
             if self._recorder.status()["status"] != "recording":
+                self._try_append_event({
+                    "type": "recording_stopped",
+                    "error": "telemetry recording stopped unexpectedly",
+                })
                 raise AgingSafetyFault("telemetry recording stopped unexpectedly")
             self._send(sample, velocity_limits)
             deadline += CONTROL_PERIOD_S
@@ -428,6 +494,11 @@ class AgingRuntime:
             if max(abs(value) for value in positions) <= HOME_TOLERANCE_RAD:
                 return
             time.sleep(0.05)
+        self._try_append_event({
+            "type": "home_verification_failed",
+            "joint_positions": [round(float(v), 4) for v in positions],
+            "tolerance_rad": HOME_TOLERANCE_RAD,
+        })
         raise AgingSafetyFault("home verification failed")
 
     def _send(self, target: Sequence[float], velocity_limits: Sequence[float]) -> None:
@@ -436,6 +507,15 @@ class AgingRuntime:
         if error > FOLLOWING_ERROR_RAD:
             self._following_error_count += 1
             if self._following_error_count >= FOLLOWING_ERROR_CONSECUTIVE_LIMIT:
+                self._try_append_event({
+                    "type": "following_error",
+                    "error": f"following error exceeded {FOLLOWING_ERROR_RAD} rad "
+                             f"({self._following_error_count} consecutive frames, max {error:.3f})",
+                    "max_error_rad": round(float(error), 4),
+                    "consecutive_count": self._following_error_count,
+                    "joint_positions": [round(float(p), 4) for p in positions],
+                    "target_positions": [round(float(t), 4) for t in target],
+                })
                 raise AgingSafetyFault(
                     f"following error exceeded {FOLLOWING_ERROR_RAD} rad "
                     f"({self._following_error_count} consecutive frames, max {error:.3f})"
@@ -501,6 +581,17 @@ class AgingRuntime:
     def _set_phase(self, phase: str, **changes: Any) -> None:
         with self._lock:
             self._status.update(phase=phase, updated_at=utc_now_iso(), **changes)
+
+    def _try_append_event(self, event: dict[str, Any]) -> None:
+        """Append an event to the active session's events.jsonl.
+
+        Failures are silently caught: the event is a best-effort audit trail
+        and must never block the aging control loop.
+        """
+        try:
+            self._recorder.append_event(event)
+        except Exception:
+            pass
 
     @staticmethod
     def _pace(deadline: float) -> float:
