@@ -919,6 +919,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
       if (commit && recording.status === 'recording' && hasCompleteBuffer) {
         const sampleCount = recordingBuffer[0].length;
         const durationMs = (sampleCount / recording.samplingHz) * 1000;
+        const timedSamples = state.recordingTimedSamples.length > 0
+          ? state.recordingTimedSamples.map((ts) => ({ ...ts }))
+          : undefined;
         const newAction: RecordedAction = {
           id: makeId('act'),
           name: recording.name,
@@ -928,6 +931,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
           samplingHz: recording.samplingHz,
           jointCount: 7,
           trails: recordingBuffer.map((trail) => [...trail]),
+          timedSamples,
           version: 'raw',
         };
         dispatch({ type: 'ADD_ACTION', action: newAction });

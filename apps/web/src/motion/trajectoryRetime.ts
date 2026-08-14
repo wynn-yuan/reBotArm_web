@@ -4,7 +4,12 @@
  * Two modes:
  *   1. 无 keypointEpsilon → 原始 verhalten(retime by joint velocity limits + trapezoidal profile)
  *   2. 有 keypointEpsilon(>0) → Catmull-Rom spline 平滑(标准拖拽教学管线)
+ *
+ * 新增模式 (retimeWithTimestamps):
+ *   3. 基于时间戳的轨迹重采样：保留原始录制节奏，仅在超速时拉伸时间
  */
+
+import type { TimedSample } from '../types';
 
 export interface UrdfJointLimit {
   lower: number;
@@ -320,3 +325,163 @@ export function retimeTrajectory(input: TrajectoryRetimeInput): TrajectoryRetime
 }
 
 export const retimeFixedSpeedTrajectory = retimeTrajectory;
+
+// ── Timestamp-preserving retime ──────────────────────────────────────────
+
+export interface TimedRetimeInput {
+  /** 带时间戳的原始采样（相对于录制开始，秒） */
+  timedSamples: TimedSample[];
+  /** 各关节速度上限 (rad/s) */
+  maxJointVelocity: readonly number[];
+  /** 输出频率 (Hz)，默认 100 */
+  outputFrequency?: number;
+  /** 整体速度比例 (0.1 ~ 2.0)，默认 1.0 */
+  overallSpeedScale?: number;
+  /** 关节限位 */
+  jointLimits?: readonly UrdfJointLimit[];
+  urdfJointLimits?: readonly UrdfJointLimit[];
+  /** 限位安全余量 (rad)，默认 0.05 */
+  limitMarginRad?: number;
+}
+
+export interface TimedRetimeResult {
+  /** [joint][sample] — 均匀采样 */
+  trails: number[][];
+  /** 处理后总时长（秒） */
+  duration: number;
+  /** 样本数 */
+  sampleCount: number;
+  /** 各关节峰值速度 (rad/s) */
+  peakVelocities: number[];
+  /** 警告信息 */
+  warnings: string[];
+  /** 原始录制时长（秒） */
+  originalDuration: number;
+  /** 被拉伸的片段数 */
+  stretchedSegments: number;
+  /** 输出频率 (Hz) */
+  outputFrequency: number;
+}
+
+/**
+ * 基于时间戳的轨迹重采样。
+ *
+ * 保留原始录制的运动节奏，只在关节速度超过 `maxJointVelocity` 时拉伸对应片段的时间。
+ * 输出为 `outputFrequency` Hz 的均匀采样，使用线性插值。
+ *
+ * 与 Catmull-Rom 模式不同，本函数不会删除帧、不会改变原始运动节奏，
+ * 也不会引入样条过冲。
+ */
+export function retimeWithTimestamps(input: TimedRetimeInput): TimedRetimeResult {
+  const { timedSamples, maxJointVelocity, jointLimits, urdfJointLimits } = input;
+  const outputFrequency = input.outputFrequency ?? DEFAULT_OUTPUT_FREQUENCY;
+  const scale = input.overallSpeedScale ?? 1;
+  const margin = input.limitMarginRad ?? LIMIT_SAFETY_MARGIN_RAD;
+  const limits = resolveLimitAlias(jointLimits, urdfJointLimits);
+  const jc = 7;
+
+  if (timedSamples.length < 2) fail('timedSamples must contain at least 2 samples');
+  if (maxJointVelocity.length !== jc) fail('maxJointVelocity must have 7 values');
+  if (maxJointVelocity.some((v) => !isFiniteNumber(v) || v <= 0)) fail('maxJointVelocity must be positive finite');
+  if (!isFiniteNumber(outputFrequency) || outputFrequency <= 0) fail('outputFrequency');
+  if (!isFiniteNumber(scale) || scale <= 0) fail('overallSpeedScale must be positive');
+
+  const originalDuration = timedSamples[timedSamples.length - 1].t - timedSamples[0].t;
+  if (originalDuration <= 0) fail('timedSamples must span a positive duration');
+
+  // 1. 计算每个原始片段的时间拉伸因子
+  const segments: { dt: number; p0: number[]; p1: number[]; scale: number }[] = [];
+  let stretchedSegments = 0;
+
+  for (let i = 1; i < timedSamples.length; i++) {
+    const rawDt = (timedSamples[i].t - timedSamples[i - 1].t) / scale;
+    if (rawDt <= 0) continue;
+    const p0 = timedSamples[i - 1].positions;
+    const p1 = timedSamples[i].positions;
+
+    let maxSpeedRatio = 0;
+    for (let j = 0; j < jc; j++) {
+      const vel = Math.abs(p1[j] - p0[j]) / rawDt;
+      const ratio = vel / maxJointVelocity[j];
+      if (ratio > maxSpeedRatio) maxSpeedRatio = ratio;
+    }
+
+    // 如果超速，拉伸时间；否则保持原速
+    const segScale = Math.max(1, maxSpeedRatio);
+    if (segScale > 1) stretchedSegments++;
+    segments.push({ dt: rawDt, p0: [...p0], p1: [...p1], scale: segScale });
+  }
+
+  // 2. 构建累计时间轴
+  const cumTime: number[] = [0];
+  for (const seg of segments) {
+    cumTime.push(cumTime[cumTime.length - 1] + seg.dt * seg.scale);
+  }
+  const totalDuration = cumTime[cumTime.length - 1];
+
+  // 3. 按输出频率采样
+  const sampleCount = Math.max(2, Math.ceil(totalDuration * outputFrequency) + 1);
+  const dt = 1 / outputFrequency;
+  const trails = Array.from({ length: jc }, () => new Array<number>(sampleCount).fill(0));
+
+  for (let s = 0; s < sampleCount; s++) {
+    const t = s * dt;
+    // 找到对应的片段
+    let segIdx = 0;
+    while (segIdx < segments.length - 1 && t > cumTime[segIdx + 1]) segIdx++;
+    const seg = segments[segIdx];
+    const segDuration = seg.dt * seg.scale;
+    const alpha = segDuration > 0 ? Math.max(0, Math.min(1, (t - cumTime[segIdx]) / segDuration)) : 0;
+
+    for (let j = 0; j < jc; j++) {
+      trails[j][s] = seg.p0[j] + (seg.p1[j] - seg.p0[j]) * alpha;
+    }
+  }
+
+  // 4. 钳制到限位内
+  if (limits) {
+    for (let j = 0; j < jc; j++) {
+      const lo = limits[j].lower + margin;
+      const hi = limits[j].upper - margin;
+      for (let s = 0; s < sampleCount; s++) {
+        trails[j][s] = Math.min(hi, Math.max(lo, trails[j][s]));
+      }
+    }
+  }
+
+  // 5. 计算峰值速度
+  const duration = totalDuration;
+  const peakVelocities = peakVelocities2(trails, duration, sampleCount);
+
+  // 6. 警告
+  const warnings: string[] = [];
+  if (stretchedSegments > 0) {
+    warnings.push(`${stretchedSegments}/${segments.length} 个片段因超速被拉伸`);
+  }
+  if (scale !== 1) {
+    warnings.push(`速度比例 ${scale}×`);
+  }
+
+  return {
+    trails,
+    duration,
+    sampleCount,
+    peakVelocities,
+    warnings,
+    originalDuration,
+    stretchedSegments,
+    outputFrequency,
+  };
+}
+
+function peakVelocities2(trails: number[][], duration: number, sc: number): number[] {
+  if (sc < 2 || duration <= 0) return trails.map(() => 0);
+  const dt = duration / (sc - 1);
+  return trails.map((trail) => {
+    let peak = 0;
+    for (let s = 1; s < trail.length; s++) {
+      peak = Math.max(peak, Math.abs(trail[s] - trail[s - 1]) / dt);
+    }
+    return peak;
+  });
+}
