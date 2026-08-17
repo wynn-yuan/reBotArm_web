@@ -1,8 +1,19 @@
-import { Power, AlertTriangle, Loader2, PlugZap, ShieldAlert } from 'lucide-react';
-import { useState } from 'react';
+import { Power, AlertTriangle, Loader2, PlugZap, ShieldAlert, RefreshCw } from 'lucide-react';
+import { useCallback, useRef, useState } from 'react';
 import { useApp } from '../../state/AppContext';
 import { ConfirmDialog } from '../common/ConfirmDialog';
+import { Modal } from '../common/Modal';
 import { postDisable, postEnable, toErrorMessage } from '../../api/client';
+
+interface OtaCheckResult {
+  ok: boolean;
+  error?: string;
+  current?: string;
+  latest?: string;
+  has_update?: boolean;
+  latest_name?: string;
+  latest_body?: string;
+}
 
 interface Props {
   onEmergencyClick: () => void;
@@ -18,6 +29,70 @@ export function TopBar({ onEmergencyClick }: Props) {
   const [manualAction, setManualAction] = useState<'enable_all' | 'disable_all' | null>(null);
   const [manualStatus, setManualStatus] = useState<'idle' | 'in-progress' | 'error'>('idle');
   const [manualError, setManualError] = useState<string | null>(null);
+
+  // OTA state
+  const [otaOpen, setOtaOpen] = useState(false);
+  const [otaStatus, setOtaStatus] = useState<OtaCheckResult | null>(null);
+  const [otaChecking, setOtaChecking] = useState(false);
+  const [otaUpdating, setOtaUpdating] = useState(false);
+  const [otaError, setOtaError] = useState<string | null>(null);
+  const [otaResult, setOtaResult] = useState<string | null>(null);
+  const otaAbortRef = useRef<AbortController | null>(null);
+
+  const checkOta = useCallback(async () => {
+    // 取消上一次未完成的请求
+    otaAbortRef.current?.abort();
+    const controller = new AbortController();
+    otaAbortRef.current = controller;
+
+    setOtaChecking(true);
+    setOtaError(null);
+    setOtaStatus(null);
+    try {
+      const resp = await fetch('/api/ota/check', { signal: controller.signal });
+      const data: OtaCheckResult = await resp.json();
+      if (!resp.ok) {
+        setOtaError(data.error || `服务器错误 (${resp.status})`);
+        return;
+      }
+      if (!data.ok) {
+        setOtaError(data.error || '无法获取更新信息');
+        return;
+      }
+      setOtaStatus(data);
+    } catch (e) {
+      if (e instanceof DOMException && e.name === 'AbortError') return;
+      setOtaError('无法连接更新服务');
+    } finally {
+      if (otaAbortRef.current === controller) {
+        otaAbortRef.current = null;
+      }
+      setOtaChecking(false);
+    }
+  }, []);
+
+  const doOtaUpdate = useCallback(async () => {
+    setOtaUpdating(true);
+    setOtaError(null);
+    setOtaResult(null);
+    try {
+      const form = new FormData();
+      form.append('confirm', 'true');
+      const resp = await fetch('/api/ota/update-from-github', { method: 'POST', body: form });
+      const data = await resp.json();
+      if (resp.ok) {
+        setOtaResult(data.message || '更新已开始');
+        // 更新已提交，隐藏"立即更新"按钮，避免重复点击
+        setOtaStatus((prev) => prev ? { ...prev, has_update: false } : null);
+      } else {
+        setOtaError(data.error || '更新失败');
+      }
+    } catch (e) {
+      setOtaError('更新请求失败');
+    } finally {
+      setOtaUpdating(false);
+    }
+  }, []);
 
   const connectLabel = scanning
     ? '扫描中…'
@@ -102,6 +177,14 @@ export function TopBar({ onEmergencyClick }: Props) {
             复位紧急失能
           </button>
         )}
+        <button
+          className="btn btn--ghost"
+          onClick={() => { setOtaOpen(true); void checkOta(); }}
+          title="系统更新"
+          aria-label="系统更新"
+        >
+          <RefreshCw size={14} />
+        </button>
       </div>
       <ConfirmDialog
         open={manualAction !== null}
@@ -111,6 +194,44 @@ export function TopBar({ onEmergencyClick }: Props) {
         onCancel={() => setManualAction(null)}
         onConfirm={() => { void submitManualAction(); }}
       />
+      <Modal open={otaOpen} title="系统更新" onClose={() => { otaAbortRef.current?.abort(); setOtaOpen(false); setOtaStatus(null); setOtaError(null); setOtaResult(null); }}>
+        <div className="stack" style={{ minWidth: 320 }}>
+          {otaStatus && (
+            <div className="stack stack--sm">
+              <div className="kv">
+                <span className="kv__k">当前版本</span>
+                <span className="kv__v mono">{otaStatus.current ?? '—'}</span>
+              </div>
+              <div className="kv">
+                <span className="kv__k">最新版本</span>
+                <span className="kv__v mono">{otaStatus.latest ?? '—'}</span>
+              </div>
+              {otaStatus.has_update && (
+                <div className="state-box" style={{ background: 'var(--color-primary-dim)', borderColor: 'var(--color-primary)' }}>
+                  <div className="state-box__desc">有新版本可用</div>
+                </div>
+              )}
+              {!otaStatus.has_update && otaStatus.latest && (
+                <div className="state-box" style={{ background: 'var(--color-success-dim)', borderColor: 'var(--color-success)' }}>
+                  <div className="state-box__desc">已是最新版本</div>
+                </div>
+              )}
+            </div>
+          )}
+          {otaError && <div className="state-box state-box--error"><div className="state-box__desc">{otaError}</div></div>}
+          {otaResult && <div className="state-box" style={{ background: 'var(--color-success-dim)', borderColor: 'var(--color-success)' }}><div className="state-box__desc">{otaResult}</div></div>}
+          <div className="row" style={{ gap: 8 }}>
+            <button className="btn btn--primary" onClick={() => { void checkOta(); }} disabled={otaChecking}>
+              {otaChecking ? '检查中…' : '检查更新'}
+            </button>
+            {otaStatus?.has_update && (
+              <button className="btn btn--warning" onClick={() => { void doOtaUpdate(); }} disabled={otaUpdating}>
+                {otaUpdating ? '更新中…' : '立即更新'}
+              </button>
+            )}
+          </div>
+        </div>
+      </Modal>
     </header>
   );
 }

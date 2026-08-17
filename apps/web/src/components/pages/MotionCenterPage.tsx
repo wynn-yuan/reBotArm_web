@@ -27,7 +27,6 @@ export const ACTION_JOINT_LIMITS = [
 
 export interface RecordGateInput {
   connected: boolean;
-  zeroTorqueActive: boolean;
   emergency: boolean;
   safetyActive: boolean;
   mode: ControlMode;
@@ -39,7 +38,7 @@ export interface RecordGateInput {
 /** Pure UI gate: recording is local-only but still requires the live safety conditions. */
 export function canStartOfflineRecording(input: RecordGateInput): boolean {
   return input.connected
-    && input.zeroTorqueActive
+    // 不再要求零力矩已激活：handleStartRecording 会自动开启
     && !input.emergency
     && !input.safetyActive
     && input.mode === 'idle'
@@ -122,7 +121,6 @@ export function MotionCenterPage() {
     safetyActive,
     startZeroTorque,
     stopZeroTorque,
-    zeroTorqueStatus,
   } = useApp();
   const { joints, stale } = useTelemetry();
   const [actionName, setActionName] = useState('');
@@ -155,10 +153,8 @@ export function MotionCenterPage() {
   const recording = state.recording;
   const isRecording = state.controlMode === 'teach_record' && recording !== null;
   const isCountdown = recording?.status === 'countdown';
-  const zeroTorqueActive = zeroTorqueStatus.status === 'active';
   const canRecord = canStartOfflineRecording({
     connected,
-    zeroTorqueActive,
     emergency,
     safetyActive,
     mode: state.controlMode,

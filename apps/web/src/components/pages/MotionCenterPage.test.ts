@@ -24,13 +24,12 @@ function liveJoints(positions: Array<number | null>): LiveJoint[] {
 const validPositions = [0, 0.2, 0.3, 0, 0, 0, 1];
 
 describe('MotionCenter offline recording gates', () => {
-  it('requires connection, active zero torque, a fresh seven-joint frame, and operator confirmation', () => {
+  it('requires connection, a fresh seven-joint frame, and operator confirmation', () => {
     expect(collectTelemetryPositions(liveJoints(validPositions))).toEqual(validPositions);
     expect(collectTelemetryPositions(liveJoints([...validPositions.slice(0, 6), null]))).toBeNull();
 
     const base = {
       connected: true,
-      zeroTorqueActive: true,
       emergency: false,
       safetyActive: false,
       mode: 'idle' as const,
@@ -39,7 +38,6 @@ describe('MotionCenter offline recording gates', () => {
       operatorConfirmed: true,
     };
     expect(canStartOfflineRecording(base)).toBe(true);
-    expect(canStartOfflineRecording({ ...base, zeroTorqueActive: false })).toBe(false);
     expect(canStartOfflineRecording({ ...base, positions: null })).toBe(false);
     expect(canStartOfflineRecording({ ...base, operatorConfirmed: false })).toBe(false);
   });

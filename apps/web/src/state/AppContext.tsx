@@ -5,6 +5,7 @@ import {
   useEffect,
   useMemo,
   useReducer,
+  useRef,
   useState,
   type ReactNode,
 } from 'react';
@@ -662,6 +663,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
     updated_at: new Date(0).toISOString(),
     error: null,
   });
+  // 用 ref 避免 startRecord 等回调闭包捕获过期 zeroTorqueStatus
+  const zeroTorqueStatusRef = useRef(zeroTorqueStatus);
+  zeroTorqueStatusRef.current = zeroTorqueStatus;
 
   // 派生：连接是否已建立（1..7 全部发现）
   const robotConnected = state.connection.status === 'connected';
@@ -882,7 +886,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         });
         return;
       }
-      if (zeroTorqueStatus.status !== 'active') {
+      if (zeroTorqueStatusRef.current.status !== 'active') {
         pushLog({
           type: 'system',
           result: 'warning',
@@ -910,7 +914,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         meta: { name: cfg.name, samplingHz: cfg.samplingHz },
       });
     },
-    [robotConnected, zeroTorqueStatus.status, pushLog],
+    [robotConnected, pushLog],
   );
 
   const stopRecord = useCallback(
