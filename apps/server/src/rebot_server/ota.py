@@ -45,6 +45,11 @@ _REQUIRED_MEMBERS = (
 )
 
 
+def _normalize_member(name: str) -> str:
+    """Strip leading './' from tar member paths."""
+    return name[2:] if name.startswith("./") else name
+
+
 def _validate_tarball(path: str) -> str:
     """Return the release id from a validated tarball, or raise ValueError."""
     if not os.path.isfile(path):
@@ -56,12 +61,15 @@ def _validate_tarball(path: str) -> str:
                 raise ValueError(f"unsafe archive path: {member.name}")
             if not (member.isfile() or member.isdir()):
                 raise ValueError(f"unsupported archive member: {member.name}")
-        names = {m.name for m in bundle.getmembers()}
+        names = {_normalize_member(m.name) for m in bundle.getmembers()}
     for required in _REQUIRED_MEMBERS:
         if required not in names:
             raise ValueError(f"missing required member: {required}")
     with tarfile.open(path, "r:gz") as bundle:
-        version_file = bundle.extractfile("VERSION")
+        try:
+            version_file = bundle.extractfile("VERSION")
+        except KeyError:
+            version_file = bundle.extractfile("./VERSION")
         if version_file is None:
             raise ValueError("cannot read VERSION")
         release_id = version_file.read().decode("utf-8").strip()
