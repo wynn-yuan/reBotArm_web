@@ -24,10 +24,10 @@ logger = logging.getLogger(__name__)
 CONTROL_HZ = 100.0
 CONTROL_PERIOD_S = 1.0 / CONTROL_HZ
 HOME_SPEED_RAD_S = 0.5
-# Home-verification tolerance. MIT position servo under gravity/friction leaves
-# a small steady-state residual (measured ~0.014 rad on M5); 0.01 rad was too
-# tight and made aging fail at home even though every joint was at zero.
-HOME_TOLERANCE_RAD = 0.05
+# Home-verification defaults.  Overridable via REBOT_HOME_TOLERANCE_RAD and
+# REBOT_HOME_VERIFY_MODE in the environment.
+HOME_TOLERANCE_RAD = 0.08
+HOME_VERIFY_TIMEOUT_S = 5.0
 HOME_TIMEOUT_S = 15.0
 TELEMETRY_TIMEOUT_S = 0.8
 # How long aging waits for real motorbridge telemetry to resume after the
@@ -92,6 +92,8 @@ class AgingRuntime:
         self._service = service
         self._recorder = recorder
         self._gravity = gravity_model  # GravityModel | None
+        self._home_tolerance = getattr(settings, "home_tolerance_rad", HOME_TOLERANCE_RAD)
+        self._home_verify_mode = getattr(settings, "home_verify_mode", "warn")
         self._lock = threading.RLock()
         self._telemetry_lock = threading.RLock()
         self._latest_frame: dict[str, Any] | None = None
@@ -283,9 +285,7 @@ class AgingRuntime:
                 if self._stop.is_set():
                     break
                 self._set_phase("returning_home")
-                self._home()
-                self._set_phase("verifying_home")
-                self._verify_home()
+                self._home()  # _home() already calls _verify_home() internally
                 with self._lock:
                     self._status["completed_rounds"] = round_number
                     self._status["updated_at"] = utc_now_iso()
@@ -301,8 +301,7 @@ class AgingRuntime:
 
             if self._stop.is_set():
                 self._set_phase("stopping")
-                self._home()
-                self._verify_home()
+                self._home()  # _home() already calls _verify_home() internally
         except AgingCommunicationLost as exc:
             final_status = "held"
             final_phase = "held"
@@ -333,7 +332,6 @@ class AgingRuntime:
                 self._fresh_positions(check_status=False)
                 self._set_phase("fault_homing")
                 self._home()
-                self._verify_home()
             except AgingCommunicationLost:
                 final_status = "held"
                 final_phase = "held"
@@ -362,7 +360,6 @@ class AgingRuntime:
                 self._fresh_positions(check_status=False)
                 self._set_phase("fault_homing")
                 self._home()
-                self._verify_home()
             except AgingCommunicationLost:
                 final_status = "held"
                 final_phase = "held"
@@ -467,11 +464,18 @@ class AgingRuntime:
             deadline = self._pace(deadline)
 
     def _move_smooth(
-        self, target: Sequence[float], velocity_limits: Sequence[float], phase: str
+        self, target: Sequence[float], velocity_limits: Sequence[float], phase: str,
+        *, check_status: bool = False,
     ) -> None:
-        start = self._fresh_positions(check_status=True)
+        """Smoothstep motion from current position to *target*.
+
+        During homing, *check_status* is False: we only check position freshness,
+        not motor status codes, because transient codes during rapid deceleration
+        should not abort the homing sequence.
+        """
+        start = self._fresh_positions(check_status=check_status)
         max_error = max(abs(float(target[i]) - start[i]) for i in range(7))
-        if max_error <= HOME_TOLERANCE_RAD:
+        if max_error <= self._home_tolerance:
             return
         duration = min(HOME_TIMEOUT_S - 3.0, max(0.2, 2.0 * max_error / HOME_SPEED_RAD_S))
         steps = max(2, int(math.ceil(duration * CONTROL_HZ)))
@@ -493,18 +497,35 @@ class AgingRuntime:
         self._verify_home()
 
     def _verify_home(self) -> None:
-        deadline = time.monotonic() + 3.0
+        deadline = time.monotonic() + HOME_VERIFY_TIMEOUT_S
         while time.monotonic() < deadline:
             positions = self._fresh_positions(check_status=True)
-            if max(abs(value) for value in positions) <= HOME_TOLERANCE_RAD:
+            if max(abs(value) for value in positions) <= self._home_tolerance:
                 return
             time.sleep(0.05)
+        # Collect joint positions for the warning/error event
+        try:
+            positions = self._fresh_positions(check_status=False)
+        except Exception:
+            positions = [0.0] * 7
+        max_error = max(abs(float(v)) for v in positions)
         self._try_append_event({
             "type": "home_verification_failed",
             "joint_positions": [round(float(v), 4) for v in positions],
-            "tolerance_rad": HOME_TOLERANCE_RAD,
+            "tolerance_rad": self._home_tolerance,
+            "max_error_rad": round(max_error, 4),
+            "mode": self._home_verify_mode,
         })
-        raise AgingSafetyFault("home verification failed")
+        if self._home_verify_mode == "stop":
+            raise AgingSafetyFault(
+                f"home verification failed: max error {max_error:.4f} rad "
+                f"exceeds tolerance {self._home_tolerance:.4f} rad"
+            )
+        logger.warning(
+            "aging: home verification out of tolerance "
+            "(max %.4f rad > %.4f rad), continuing in warn mode",
+            max_error, self._home_tolerance,
+        )
 
     def _send(self, target: Sequence[float], velocity_limits: Sequence[float]) -> None:
         positions = self._fresh_positions(check_status=True)

@@ -93,9 +93,11 @@ class ScanService:
         channel: str,
         expected_ids: Sequence[int] = EXPECTED_MOTOR_IDS,
         zero_torque_hz: float = 50.0,
+        require_all_motors: bool = True,
     ) -> None:
         self._channel = validate_channel(channel)
         self._expected_ids = tuple(expected_ids)
+        self._require_all_motors = require_all_motors
         self._scanner = scanner
         self._state_lock = threading.Lock()
         self._scan_lock = threading.Lock()
@@ -276,10 +278,13 @@ class ScanService:
             if self._aging_motion_active:
                 raise AgingBusyError("aging motion is already active")
             snapshot = self.snapshot()
-            if (
-                snapshot.get("status") != STATUS_CONNECTED
-                or set(snapshot.get("found_ids", ())) != set(self._expected_ids)
-            ):
+            if snapshot.get("status") != STATUS_CONNECTED:
+                raise ServiceOperationError(
+                    "aging motion requires a connected scan"
+                )
+            if self._require_all_motors and set(
+                snapshot.get("found_ids", ())
+            ) != set(self._expected_ids):
                 raise ServiceOperationError(
                     "aging motion requires a complete scan of motor IDs 1..7"
                 )
@@ -419,9 +424,12 @@ class ScanService:
                 if status == "stopping":
                     raise ZeroTorqueBusyError("zero-torque mode is stopping")
                 snapshot = self._state
-                if (
-                    snapshot.status != STATUS_CONNECTED
-                    or set(snapshot.found_ids) != set(self._expected_ids)
+                if snapshot.status != STATUS_CONNECTED:
+                    raise ZeroTorqueUnavailable(
+                        "zero-torque mode requires a connected scan"
+                    )
+                if self._require_all_motors and set(snapshot.found_ids) != set(
+                    self._expected_ids
                 ):
                     raise ServiceOperationError(
                         "zero-torque mode requires a complete scan of motor IDs 1..7"
@@ -904,15 +912,23 @@ class ScanService:
         found_set = set(found)
         missing = tuple(mid for mid in self._expected_ids if mid not in found_set)
         if missing:
-            # Missing ANY expected ID => partial. Never presented as success.
-            status = STATUS_PARTIAL
-            parts = [f"missing motor IDs: {_format_ids(missing)}"]
-            for mid in sorted(outcome.errors):
-                parts.append(f"motor {mid}: {outcome.errors[mid]}")
-            message = (
-                f"Found {len(found)}/{len(self._expected_ids)} motors on "
-                f"{self._channel}; " + "; ".join(parts)
-            )
+            if self._require_all_motors:
+                status = STATUS_PARTIAL
+                parts = [f"missing motor IDs: {_format_ids(missing)}"]
+                for mid in sorted(outcome.errors):
+                    parts.append(f"motor {mid}: {outcome.errors[mid]}")
+                message = (
+                    f"Found {len(found)}/{len(self._expected_ids)} motors on "
+                    f"{self._channel}; " + "; ".join(parts)
+                )
+            else:
+                # Allow partial scans to be treated as connected
+                status = STATUS_CONNECTED
+                message = (
+                    f"Found {len(found)}/{len(self._expected_ids)} motors on "
+                    f"{self._channel} (partial allowed); "
+                    f"missing: {_format_ids(missing)}"
+                )
         else:
             status = STATUS_CONNECTED
             message = (

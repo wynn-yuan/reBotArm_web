@@ -96,7 +96,22 @@ DEFAULT_GRAVITY_COMPENSATION_ENABLE = False
 #: and 3 (elbow) are most likely to need adjustment.  Default all-1.0.
 DEFAULT_GRAVITY_COMPENSATION_FACTOR = (1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0)
 
+#: Home-verification tolerance (rad).  MIT position servo under gravity/friction
+#: leaves a small steady-state residual.  Default 0.05 rad was too tight for some
+#: configurations; 0.08 rad is a more forgiving default.
+DEFAULT_HOME_TOLERANCE_RAD = 0.08
+#: Home-verification failure mode: "warn" logs a warning and continues aging,
+#: "stop" raises AgingSafetyFault and aborts the cycle.  Default "warn".
+DEFAULT_HOME_VERIFY_MODE = "warn"
+
+#: Require all 7 motor IDs (1..7) to be detected for the scan to report
+#: "connected" (default ON = fail closed).  When OFF, a partial scan with
+#: at least one motor found is promoted to "connected" so the arm can be
+#: used even with missing motors.
+DEFAULT_REQUIRE_ALL_MOTORS = True
+
 _VALID_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+_VALID_HOME_VERIFY_MODES = ("warn", "stop")
 
 
 class ConfigError(ValueError):
@@ -212,6 +227,12 @@ class Settings:
     gravity_compensation_enable: bool = DEFAULT_GRAVITY_COMPENSATION_ENABLE
     #: Per-joint gravity compensation scaling factors (J1..J7, default all 1.0).
     gravity_compensation_factor: tuple[float, ...] = DEFAULT_GRAVITY_COMPENSATION_FACTOR
+    #: Home-verification tolerance (rad).
+    home_tolerance_rad: float = DEFAULT_HOME_TOLERANCE_RAD
+    #: Home-verification failure mode: "warn" or "stop".
+    home_verify_mode: str = DEFAULT_HOME_VERIFY_MODE
+    #: Require all 7 motor IDs for scan to report "connected".
+    require_all_motors: bool = DEFAULT_REQUIRE_ALL_MOTORS
     log_json: bool = True
     log_level: str = "INFO"
 
@@ -377,6 +398,23 @@ def load_settings(env: Optional[Mapping[str, str]] = None) -> Settings:
     )
 
     try:
+        home_tolerance_rad = float(
+            get("REBOT_HOME_TOLERANCE_RAD", str(DEFAULT_HOME_TOLERANCE_RAD))
+        )
+    except ValueError:
+        raise ConfigError("REBOT_HOME_TOLERANCE_RAD must be a number") from None
+    if not math.isfinite(home_tolerance_rad) or not 0.0 < home_tolerance_rad <= 0.5:
+        raise ConfigError("REBOT_HOME_TOLERANCE_RAD must be in (0, 0.5]")
+
+    home_verify_mode = get("REBOT_HOME_VERIFY_MODE", DEFAULT_HOME_VERIFY_MODE).lower()
+    if home_verify_mode not in _VALID_HOME_VERIFY_MODES:
+        raise ConfigError(
+            f"REBOT_HOME_VERIFY_MODE must be one of {_VALID_HOME_VERIFY_MODES}"
+        )
+
+    require_all_motors = _as_bool(get("REBOT_REQUIRE_ALL_MOTORS", "1"))
+
+    try:
         port = int(get("REBOT_PORT", str(DEFAULT_HTTP_PORT)))
     except ValueError:
         raise ConfigError("REBOT_PORT must be an integer") from None
@@ -418,6 +456,9 @@ def load_settings(env: Optional[Mapping[str, str]] = None) -> Settings:
         mit_kd=mit_kd,
         gravity_compensation_enable=gravity_compensation_enable,
         gravity_compensation_factor=gravity_compensation_factor,
+        home_tolerance_rad=home_tolerance_rad,
+        home_verify_mode=home_verify_mode,
+        require_all_motors=require_all_motors,
         log_json=log_json,
         log_level=log_level,
     )

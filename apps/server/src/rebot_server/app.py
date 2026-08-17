@@ -76,6 +76,7 @@ def create_app(
             settings.channel,
             settings.expected_ids,
             zero_torque_hz=settings.zero_torque_hz,
+            require_all_motors=settings.require_all_motors,
         )
 
     # Active-report telemetry hub (motorbridge mode only). In simulation
