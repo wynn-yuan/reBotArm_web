@@ -14,6 +14,7 @@ dependencies = [
     "fastapi>=0.110,<1.0",
     "uvicorn[standard]>=0.29",
     "python-dotenv>=1.0",
+    "python-multipart>=0.0.5",
     # Pinned EXACTLY: this server is verified against the motorbridge 0.5.1
     # source only (scan + telemetry read-only audit). Startup fails closed on
     # any other version; see rebot_server/sdkcheck.py.

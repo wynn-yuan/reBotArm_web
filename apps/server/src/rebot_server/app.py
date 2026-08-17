@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Optional
 
 from . import __version__
@@ -11,6 +12,7 @@ from .aging_recorder import AgingRecorder
 from .aging_runtime import AgingRuntime
 from .config import ADAPTER_MOTORBRIDGE, Settings, load_settings
 from .gravity import GravityModel
+from .ota import router as ota_router
 from .scanners import create_scanner
 from .scanners.base import CanScanner
 from .scanners.motorbridge import (
@@ -239,6 +241,7 @@ def create_app(
     app.state.capabilities = capabilities
     app.state.motorbridge_version = motorbridge_version
     app.state.motorbridge_abi_version = motorbridge_abi_version
+    app.state._started_at = time.monotonic()
 
     origins = list(settings.cors_origins)
     if "*" in origins:
@@ -256,6 +259,7 @@ def create_app(
         **cors,
     )
     app.include_router(router)
+    app.include_router(ota_router)
 
     # Optional same-origin static hosting of the pre-built web UI. Included
     # AFTER the API router: /api and /ws always win. Fails closed at app
