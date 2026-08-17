@@ -72,6 +72,10 @@ class ZeroTorqueBusyError(RuntimeError):
     """The backend-owned zero-torque state machine owns the bus."""
 
 
+class ZeroTorqueUnavailable(RuntimeError):
+    """Zero-torque mode requires a connected scan."""
+
+
 class AgingBusyError(BusBusyError):
     """The backend-owned aging state machine owns motion control."""
 
@@ -922,13 +926,21 @@ class ScanService:
                     f"{self._channel}; " + "; ".join(parts)
                 )
             else:
-                # Allow partial scans to be treated as connected
-                status = STATUS_CONNECTED
-                message = (
-                    f"Found {len(found)}/{len(self._expected_ids)} motors on "
-                    f"{self._channel} (partial allowed); "
-                    f"missing: {_format_ids(missing)}"
-                )
+                # Allow partial scans to be treated as connected, but require
+                # at least one motor found to prevent use with no hardware.
+                if len(found) == 0:
+                    status = STATUS_PARTIAL
+                    message = (
+                        f"No motors found on {self._channel}; "
+                        f"expected IDs: {_format_ids(self._expected_ids)}"
+                    )
+                else:
+                    status = STATUS_CONNECTED
+                    message = (
+                        f"Found {len(found)}/{len(self._expected_ids)} motors on "
+                        f"{self._channel} (partial allowed); "
+                        f"missing: {_format_ids(missing)}"
+                    )
         else:
             status = STATUS_CONNECTED
             message = (
