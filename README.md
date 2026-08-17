@@ -1,15 +1,16 @@
 # reBotArm 平台（rebotarm-platform）
 
 reBot B601-RS（6 旋转关节 + 1 夹爪）机械臂的本机 Web 控制台。包含 React 前端、
-FastAPI + motorbridge 0.5.1 后端、动作轨迹处理、真实 MIT 老化循环，以及 Jetson
-用户态部署脚本（版本化 release + 原子切换 + 回滚）。
+FastAPI + motorbridge 0.5.1 后端、动作轨迹处理、真实 MIT 老化循环、OTA 远程更新，
+以及 Jetson 用户态部署脚本（版本化 release + 原子切换 + 回滚）。
 
-> **当前阶段（2026-08-14）**：真机 Web 控制台已上线。动作中心录制 raw → 轨迹处理
+> **当前阶段（2026-08-17）**：真机 Web 控制台已上线。动作中心录制 raw → 轨迹处理
 > （抗尖峰滤波 + RDP 顶点提取 + 最小加加速度平滑）→ 保存到后端 **Trajectory 动作库**；
 > 老化按动作 ID 从 Trajectory 读取，以 **MIT 位置伺服模式**执行循环动作并同时记录遥测。
 > 零重力拖拽录制、机械零位、MIT 模式确认、老化周期均已人工验证通过。
-> **新增**：重力补偿功能——从 URDF 模型计算各关节重力矩，通过 MIT 扭矩前馈消除运动下垂；
-> 老化日志全面记录异常事件与已老化时间。
+> **新增**：OTA 远程更新（从 GitHub Releases 拉取 + 进度条 + 自动重启）；
+> 录制时自动开启零力矩模式（无需手动进入）；URDF 模型升级至 v3；
+> 回零校验模式可配置（warn 仅警告 / stop 终止老化）。
 
 ## 目录树
 
@@ -19,7 +20,7 @@ reBotArm_web/
 │   ├── web/                    React 18 + TypeScript + Vite + R3F 前端
 │   └── server/                 FastAPI + motorbridge 0.5.1 后端
 ├── packages/
-│   ├── robot-description/      机器人描述预留目录
+│   ├── robot-description/      机器人 URDF 模型与 mesh 文件
 │   └── shared/                 共享协议预留目录
 ├── docs/
 │   ├── product/                UI 规格
@@ -32,7 +33,7 @@ reBotArm_web/
 │       ├── make_release.sh     release 打包器（开发机/本机）
 │       ├── install_release.sh  用户态 release 安装器（Jetson）
 │       └── SOURCE_DEPLOYMENT.md  完整部署指南
-├── deploy.sh                   Jetson 源码一键部署入口（在 JetSon 上含源码时使用）
+├── deploy.sh                   Jetson 源码一键部署入口（在 Jetson 上含源码时使用）
 ├── .gitignore
 ├── package.json                根 workspace（rebotarm-platform）
 └── README.md                   本文件
@@ -73,6 +74,27 @@ python -m rebot_server                             # 启动后端（默认 127.0
 
 ## 关键设计
 
+### OTA 远程更新
+
+顶栏右侧 🔄 按钮提供系统更新功能：
+
+- **检查更新**：`GET /api/ota/check` 查询 GitHub Releases，对比当前版本
+- **一键更新**：`POST /api/ota/update-from-github` 下载最新 release tarball，后台安装
+- **进度追踪**：安装过程分步展示进度条（下载 → 停止 → 解压 → 安装 → 激活 → 启动 → 完成）
+- **自动刷新**：更新完成后自动刷新页面
+- **安全门禁**：老化或零力矩运行时拒绝更新（409）
+
+更新流程由 `ota.py` 驱动，安装脚本在后台执行：停止服务 → 解压 → pip install → 原子切换
+`current` 软链接 → 启动服务。服务重启后 `REBOTARM_BASE` 环境变量确保版本识别正确。
+
+### 零力矩拖拽录制
+
+动作中心「开始录制」按钮不再要求零力矩已激活。点击后自动调用 `startZeroTorque()`，
+成功或失败均继续录制流程。录制结束后自动调用 `stopZeroTorque()` 退出零力矩模式。
+
+> **注意**：`startRecord` 内部仍检查零力矩状态（通过 `useRef` 而非闭包捕获，避免竞态条件）。
+> 若零力矩启动失败，录制会被拒绝并提示"零力矩模式未激活"。
+
 ### Trajectory 动作库
 - 动作真实存储在后端部署目录 **`$BASE/Trajectory/`**（与老化日志 `$BASE/log/` 同级）。
 - 动作中心保存 processed 动作 → 写入 Trajectory；老化页面从 Trajectory 列出可选动作。
@@ -102,10 +124,20 @@ python -m rebot_server                             # 启动后端（默认 127.0
   遥测与老化零锁竞争(100Hz 下消除每秒 100 次抢锁)。
 - **主动上报关闭**：老化期间 `robstride_set_active_report(False)`，减少 CAN 总线负载
   (MIT 回复帧已包含状态，无需额外上报)；老化结束后恢复。
-- 执行频率 100Hz(录制/处理/执行统一)，回零验证容差 0.05 rad(MIT 稳态残差)。
+- 执行频率 100Hz(录制/处理/执行统一)，回零验证容差 0.08 rad(MIT 稳态残差)。
 - MIT 增益每关节配置（`REBOT_MIT_KP/KD`，参考 `reBotArm_control/config/rebotarm_rs.yaml`）。
-- 回零验证容差 0.05 rad（MIT 位置伺服在重力/摩擦下的稳态残差）。
 - 跟随误差保护：连续 3 帧超限才报错，单帧瞬态跳过不中断。
+
+### 回零校验模式
+
+老化每轮结束后执行回零校验（`_verify_home`），最大等待 5 秒。超过容差后的行为可配置：
+
+| 模式 | 行为 | 配置 |
+|------|------|------|
+| `warn`（默认） | 记录 `home_verification_failed` 事件 + warning 日志，**继续老化** | `REBOT_HOME_VERIFY_MODE=warn` |
+| `stop` | 抛出 `AgingSafetyFault`，**终止老化**并进入 error 状态 | `REBOT_HOME_VERIFY_MODE=stop` |
+
+容差通过 `REBOT_HOME_TOLERANCE_RAD` 配置（默认 0.08 rad ≈ 4.6°）。
 
 ### 温度保护（老化）
 老化页面可设置「温度保护 °C」（可选，留空则不限制）。老化执行中逐帧读取遥测的
@@ -177,7 +209,14 @@ $BASE/bin/rebotarm-health.sh
 $BASE/bin/rebotarm-stop.sh
 ```
 
-### 方式 B：源码一键部署（Jetson 上已有源码）
+### 方式 B：OTA 远程更新（推荐日常升级）
+```bash
+# 在 UI 顶栏点击 🔄 按钮 → 检查更新 → 立即更新
+# 后端自动从 GitHub Releases 下载最新版本并安装，显示进度条
+# 更新完成后自动刷新页面
+```
+
+### 方式 C：源码一键部署（Jetson 上已有源码）
 ```bash
 cd /home/revolute1/rebotarm-src/reBotArm_web
 sh deploy.sh                # 构建、测试、打包、安装、切换、健康检查（失败自动回滚）
@@ -202,6 +241,10 @@ REBOT_ALLOW_AGING_WRITE=1
 REBOT_ALLOW_ZERO_TORQUE_WRITE=1
 REBOT_ZERO_TORQUE_HZ=50
 
+# 回零校验
+REBOT_HOME_VERIFY_MODE=warn          # warn（默认，仅警告）| stop（终止老化）
+REBOT_HOME_TOLERANCE_RAD=0.08        # 回零容差（rad），默认 0.08 ≈ 4.6°
+
 REBOT_HOST=127.0.0.1
 REBOT_PORT=8000
 REBOT_LOG_JSON=1
@@ -210,6 +253,7 @@ REBOT_LOG_LEVEL=INFO
 
 - `REBOT_AGING_LOG_ROOT` 由启动脚本固定为 `$BASE/log`；`REBOT_TRAJECTORY_DIR` 固定为
   `$BASE/Trajectory`，均不由 UI 选择。
+- `REBOTARM_BASE` 由 `rebotarm-start.sh` 自动导出，OTA 版本识别依赖此环境变量。
 - MIT 增益可选：`REBOT_MIT_KP=50,150,150,50,50,50,50`、`REBOT_MIT_KD=3,10,10,5,4,4,4`。
 - 重力补偿可选（默认关闭）：`REBOT_GRAVITY_COMPENSATION_ENABLE=1`、补偿因子
   `REBOT_GRAVITY_COMPENSATION_FACTOR=1,1,1,1,1,1,1`（J1..J7）。
@@ -246,7 +290,7 @@ PCAN 驱动未以 SocketCAN 模式编译（需 `make NET=NETDEV_SUPPORT` 重新�
 
 ```text
 首次回零 → 平滑定位到动作起点 → processed 轨迹（MIT）
-→ 回零验证 → 间隔 → 再次回零验证 → 下一轮
+→ 回零 → 回零校验 → 间隔 → 再次回零校验 → 下一轮
 ```
 
 支持次数 / 时长 / 无限循环。MIT 发送频率 50Hz，使用绝对单调 deadline，延迟后不补发追赶帧。
@@ -268,6 +312,10 @@ PCAN 驱动未以 SocketCAN 模式编译（需 `make NET=NETDEV_SUPPORT` 重新�
 | GET/POST/DELETE | `/api/aging/actions` | Trajectory 动作库（列出/保存/删除） |
 | GET/POST | `/api/aging/{status,start,stop}` | 老化状态与确认启停 |
 | GET | `/api/aging/logs` | 固定日志目录与执行能力 |
+| GET | `/api/ota/check` | OTA 检查更新（对比 GitHub Releases） |
+| POST | `/api/ota/update-from-github` | OTA 从 GitHub 下载并安装 |
+| GET | `/api/ota/progress` | OTA 安装进度追踪 |
+| GET | `/api/ota/status` | 当前版本与部署信息 |
 
 写接口必须满足 capability 与确认要求；不要用部署或自动化脚本调用真机动作接口。
 
@@ -290,9 +338,12 @@ readlink "$BASE/current"
   再核对 env 的 `REBOT_CAN_CHANNEL` 是否等于检测到的接口名。
 - 服务重启后未连接：UI 中操作者重新扫描（初始 `disconnected` 是预期）。
 - 老化按钮不可用：确认完整连接、新鲜真机遥测、`REBOT_ALLOW_AGING_WRITE=1`、Trajectory 有动作。
-- 老化报 `home verification failed`：机械臂仍应在零位附近，通常是 MIT 稳态残差，可核对 `log` 遥测。
+- 老化报 `home verification failed`：机械臂仍应在零位附近，通常是 MIT 稳态残差；
+  `REBOT_HOME_VERIFY_MODE=warn` 时仅警告不中断，`stop` 时终止老化。可核对 `log` 遥测。
 - 页面停顿：确认 WebSocket 持续收到真实遥测。
 - 服务无法启动：看 `shared/logs/server.out`，不要用 kill 代替 `rebotarm-stop.sh`。
+- OTA 版本显示为 "—"：确认 `rebotarm-start.sh` 已导出 `REBOTARM_BASE` 环境变量；
+  更新到最新 release 后自动修复。
 
 ## 参考工程
 
