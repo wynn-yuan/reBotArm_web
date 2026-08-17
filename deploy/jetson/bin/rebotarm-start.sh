@@ -15,6 +15,11 @@ set -eu
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 BASE=$(dirname "$SCRIPT_DIR")
 
+# OTA: _resolve_base() uses this env var to find the current symlink.
+# Must be exported before the server starts so the fallback __file__-based
+# path resolution (which points into site-packages) is never reached.
+export REBOTARM_BASE="$BASE"
+
 ENV_FILE="$BASE/shared/env/rebotarm.env"
 LOG_DIR="$BASE/shared/logs"
 AGING_LOG_DIR="$BASE/log"

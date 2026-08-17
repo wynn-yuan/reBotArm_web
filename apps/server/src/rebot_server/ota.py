@@ -90,6 +90,12 @@ def _resolve_base() -> str:
     # 1 more: .../ (the BASE)
     return str(current.parent)
 
+
+def _progress_file(base: str) -> str:
+    """Return the path to the OTA progress tracking file."""
+    return os.path.join(base, "shared", "logs", "ota-progress.json")
+
+
 #: GitHub repository for OTA updates.
 GITHUB_REPO = os.environ.get("REBOT_OTA_REPO", "wynn-yuan/reBotArm_web")
 _GITHUB_API = f"https://api.github.com/repos/{GITHUB_REPO}"
@@ -156,8 +162,9 @@ def _download_asset(release: dict, tmpdir: str) -> Optional[str]:
 
 
 def _write_install_script(base: str, tarball: str, release_id: str, tmpdir: str) -> str:
-    """Write a background install script, return its path."""
+    """Write a background install script with progress tracking, return its path."""
     script = os.path.join(tmpdir, "install.sh")
+    progress = _progress_file(base)
     with open(script, "w") as f:
         f.write(f"""#!/bin/sh
 set -eu
@@ -165,18 +172,27 @@ BASE="{base}"
 TARBALL="{tarball}"
 TMPDIR="{tmpdir}"
 RELEASE_ID="{release_id}"
+PROGRESS="{progress}"
 
-echo "[OTA] stopping service..."
+_step() {{
+    STEP=$1; MSG=$2; PCT=$3
+    printf '{{"step":"%s","message":"%s","progress":%s}}\\n' "$STEP" "$MSG" "$PCT" > "$PROGRESS"
+    echo "[OTA] $MSG"
+}}
+
+_step "downloading" "正在下载更新包..." 0.05
+_step "stopping" "正在停止服务..." 0.15
 "$BASE/bin/rebotarm-stop.sh" 2>/dev/null || true
 sleep 1
 
-echo "[OTA] extracting..."
+_step "extracting" "正在解压更新包..." 0.25
 mkdir -p "$BASE/releases"
 EXTRACT_DIR="$TMPDIR/extract"
 mkdir -p "$EXTRACT_DIR"
 tar -xzf "$TARBALL" -C "$EXTRACT_DIR"
 
 if [ -e "$BASE/releases/$RELEASE_ID" ]; then
+    printf '{{"step":"error","message":"release already exists: %s","progress":1.0}}\\n' "$RELEASE_ID" > "$PROGRESS"
     echo "[OTA] ERROR: release already exists"
     rm -rf "$TMPDIR"
     exit 1
@@ -184,22 +200,23 @@ fi
 mv "$EXTRACT_DIR" "$BASE/releases/$RELEASE_ID"
 REL="$BASE/releases/$RELEASE_ID"
 
-echo "[OTA] installing server..."
+_step "installing" "正在安装依赖..." 0.45
 "$BASE/shared/venv/bin/pip" install --disable-pip-version-check --quiet "$REL/server"
 
-echo "[OTA] activating..."
+_step "activating" "正在激活新版本..." 0.65
 install -m 755 "$REL/scripts/rebotarm-start.sh" "$BASE/bin/rebotarm-start.sh"
 install -m 755 "$REL/scripts/rebotarm-stop.sh" "$BASE/bin/rebotarm-stop.sh"
 install -m 755 "$REL/scripts/rebotarm-health.sh" "$BASE/bin/rebotarm-health.sh"
 ln -sfn "releases/$RELEASE_ID" "$BASE/current.new"
 mv -T "$BASE/current.new" "$BASE/current"
 
-echo "[OTA] starting..."
+_step "starting" "正在启动服务..." 0.80
 "$BASE/bin/rebotarm-start.sh" 2>&1
 
-echo "[OTA] cleaning up..."
+_step "cleanup" "正在清理..." 0.95
 rm -rf "$TMPDIR"
 
+printf '{{"step":"done","message":"更新完成: %s","progress":1.0}}\\n' "$RELEASE_ID" > "$PROGRESS"
 echo "[OTA] done: $RELEASE_ID"
 """)
     os.chmod(script, 0o755)
@@ -235,6 +252,25 @@ def get_ota_check(request: Request) -> dict:
         "latest_name": latest.get("name", ""),
         "latest_body": latest.get("body", "")[:500],
     }
+
+
+@router.get("/api/ota/progress")
+def get_ota_progress(request: Request) -> dict:
+    """Return the current OTA install progress (read from the status file)."""
+    base = _resolve_base()
+    progress = _progress_file(base)
+    try:
+        with open(progress, "r") as f:
+            last_line = None
+            for line in f:
+                line = line.strip()
+                if line:
+                    last_line = line
+            if last_line:
+                return json.loads(last_line)
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+    return {"step": "idle", "message": "", "progress": 0.0}
 
 
 @router.post("/api/ota/update-from-github")
@@ -294,6 +330,7 @@ async def post_ota_github(
         "release_id": tag_name,
         "message": "OTA update started; service will restart in ~15 seconds",
     }
+
 
 @router.get("/api/ota/status")
 def get_ota_status(request: Request) -> dict:
