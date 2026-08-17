@@ -120,6 +120,8 @@ export function MotionCenterPage() {
     saveProcessedAction,
     deleteAction,
     safetyActive,
+    startZeroTorque,
+    stopZeroTorque,
     zeroTorqueStatus,
   } = useApp();
   const { joints, stale } = useTelemetry();
@@ -243,8 +245,12 @@ export function MotionCenterPage() {
   const handleStartRecording = useCallback(() => {
     if (!canRecord) return;
     const config: RecordConfig = { name: actionName.trim(), samplingHz: RECORDING_FREQUENCY, countdownSec };
-    startRecord(config);
-  }, [actionName, canRecord, countdownSec, startRecord]);
+    startZeroTorque().then(() => {
+      startRecord(config);
+    }).catch(() => {
+      startRecord(config); // 零力矩启动失败也继续录制
+    });
+  }, [actionName, canRecord, countdownSec, startRecord, startZeroTorque]);
 
   const handleProcess = useCallback(() => {
     if (!selectedRaw) {
@@ -324,9 +330,9 @@ export function MotionCenterPage() {
               {!isRecording ? (
                 <button className="btn btn--primary" disabled={!canRecord} onClick={handleStartRecording}><Play size={14} /> 开始录制</button>
               ) : isCountdown ? (
-                <button className="btn btn--warning" onClick={() => stopRecord({ commit: false, reentry: 'idle' })}>取消倒计时</button>
+                <button className="btn btn--warning" onClick={() => { stopRecord({ commit: false, reentry: 'idle' }); stopZeroTorque(); }}>取消倒计时</button>
               ) : (
-                <button className="btn btn--warning" onClick={() => stopRecord({ commit: true, reentry: 'idle' })}><Save size={14} /> 结束并保存 raw</button>
+                <button className="btn btn--warning" onClick={() => { stopRecord({ commit: true, reentry: 'idle' }); stopZeroTorque(); }}><Save size={14} /> 结束并保存 raw</button>
               )}
               {isRecording && <div className="motion-center__recording-stats"><span>已采样 <b>{recording?.sampleCount ?? 0}</b> 帧</span><span>时长 <b>{formatDuration(recordingDuration)}</b></span><span>只保存 raw</span></div>}
             </div>

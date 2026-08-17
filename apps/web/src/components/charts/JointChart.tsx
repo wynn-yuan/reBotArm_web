@@ -151,6 +151,12 @@ export const JointChart = memo(function JointChart({ series, metric, windowSize,
     return null;
   }
 
+  // 最新值摘要
+  const latestValues = series.map((s) => {
+    const last = s.data[s.data.length - 1];
+    return { motorId: s.motorId, value: last?.v ?? null };
+  });
+
   return (
     <div style={{ position: 'relative' }}>
       <ReactECharts
@@ -161,6 +167,26 @@ export const JointChart = memo(function JointChart({ series, metric, windowSize,
         style={{ width: '100%', height: 360 }}
         opts={{ renderer: 'canvas' }}
       />
+      {/* 最新值摘要行 */}
+      <div style={{
+        display: 'flex', gap: 12, padding: '4px 8px', flexWrap: 'wrap',
+        borderTop: '1px solid #2a3543', marginTop: 4,
+      }}>
+        {latestValues.map((item) => {
+          const color = COLORS[item.motorId] ?? '#9aa7b3';
+          const label = metric === 'status'
+            ? String(item.value ?? '—')
+            : item.value != null ? item.value.toFixed(3) : '—';
+          return (
+            <span key={item.motorId} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 12 }}>
+              <span style={{ width: 8, height: 8, background: color, borderRadius: '50%', display: 'inline-block' }} />
+              <span style={{ color: '#9aa7b3' }}>J{item.motorId}</span>
+              <b style={{ color: '#e6edf3' }}>{label}</b>
+              <span style={{ color: '#6b7b8d', fontSize: 10 }}>{METRIC_UNIT[metric]}</span>
+            </span>
+          );
+        })}
+      </div>
       {onClear && (
         <button
           className="btn btn--ghost btn--sm"

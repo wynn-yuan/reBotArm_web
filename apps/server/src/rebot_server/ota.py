@@ -1,13 +1,18 @@
 """Remote OTA (Over-The-Air) update endpoint.
 
-Upload a pre-built release tarball via the web UI and trigger an atomic
-install + restart. The install runs in a background script so the active
-request handler can finish before the service stops.
+Two update modes:
+  1. File upload:  POST /api/ota/update  with a release .tar.gz
+  2. GitHub pull:  POST /api/ota/update-from-github  downloads the latest
+     release asset from the configured GitHub repository.
+
+The install runs in a background script so the active request handler can
+finish before the service stops.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import pathlib
@@ -17,6 +22,8 @@ import tarfile
 import tempfile
 import time
 from typing import Optional
+from urllib.error import HTTPError, URLError
+from urllib.request import Request as UrlRequest, urlopen
 
 from fastapi import APIRouter, File, Form, Request, UploadFile
 from fastapi.responses import JSONResponse
@@ -75,6 +82,205 @@ def _resolve_base() -> str:
     # 1 more: .../ (the BASE)
     return str(current.parent)
 
+#: GitHub repository for OTA updates.
+GITHUB_REPO = os.environ.get("REBOT_OTA_REPO", "wynn-yuan/reBotArm_web")
+_GITHUB_API = f"https://api.github.com/repos/{GITHUB_REPO}"
+
+
+def _github_api(path: str) -> Optional[dict]:
+    """GET request to GitHub API. Returns parsed JSON or None."""
+    req = UrlRequest(f"{_GITHUB_API}/{path}")
+    req.add_header("Accept", "application/vnd.github+json")
+    req.add_header("User-Agent", "rebot-server-ota")
+    token = os.environ.get("GITHUB_TOKEN", "")
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    try:
+        with urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read().decode())
+    except HTTPError as exc:
+        # 404 = no releases yet; other codes are real errors
+        if exc.code == 404:
+            return None
+        logger.warning("OTA: GitHub API HTTP %s: %s", exc.code, exc.reason)
+        return None
+    except (URLError, json.JSONDecodeError, OSError) as exc:
+        logger.warning("OTA: GitHub API failed: %s", exc)
+        return None
+
+
+def _download_asset(release: dict, tmpdir: str) -> Optional[str]:
+    """Download the first .tar.gz asset from a release. Returns path."""
+    for asset in release.get("assets", []):
+        if not asset.get("name", "").endswith(".tar.gz"):
+            continue
+        url = asset.get("browser_download_url", "")
+        if not url:
+            continue
+        tarball = os.path.join(tmpdir, "release.tar.gz")
+        logger.info("OTA: downloading %s", asset.get("name"))
+        req = UrlRequest(url)
+        req.add_header("Accept", "application/octet-stream")
+        req.add_header("User-Agent", "rebot-server-ota")
+        total = 0
+        try:
+            with urlopen(req, timeout=300) as resp:
+                with open(tarball, "wb") as f:
+                    while True:
+                        chunk = resp.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        total += len(chunk)
+                        if total > MAX_UPLOAD_BYTES:
+                            return None
+                        f.write(chunk)
+        except (URLError, OSError) as exc:
+            logger.warning("OTA: download failed: %s", exc)
+            return None
+        logger.info("OTA: downloaded %d bytes", total)
+        return tarball
+    return None
+
+
+def _write_install_script(base: str, tarball: str, release_id: str, tmpdir: str) -> str:
+    """Write a background install script, return its path."""
+    script = os.path.join(tmpdir, "install.sh")
+    with open(script, "w") as f:
+        f.write(f"""#!/bin/sh
+set -eu
+BASE="{base}"
+TARBALL="{tarball}"
+TMPDIR="{tmpdir}"
+RELEASE_ID="{release_id}"
+
+echo "[OTA] stopping service..."
+"$BASE/bin/rebotarm-stop.sh" 2>/dev/null || true
+sleep 1
+
+echo "[OTA] extracting..."
+mkdir -p "$BASE/releases"
+EXTRACT_DIR="$TMPDIR/extract"
+mkdir -p "$EXTRACT_DIR"
+tar -xzf "$TARBALL" -C "$EXTRACT_DIR"
+
+if [ -e "$BASE/releases/$RELEASE_ID" ]; then
+    echo "[OTA] ERROR: release already exists"
+    rm -rf "$TMPDIR"
+    exit 1
+fi
+mv "$EXTRACT_DIR" "$BASE/releases/$RELEASE_ID"
+REL="$BASE/releases/$RELEASE_ID"
+
+echo "[OTA] installing server..."
+"$BASE/shared/venv/bin/pip" install --disable-pip-version-check --quiet "$REL/server"
+
+echo "[OTA] activating..."
+install -m 755 "$REL/scripts/rebotarm-start.sh" "$BASE/bin/rebotarm-start.sh"
+install -m 755 "$REL/scripts/rebotarm-stop.sh" "$BASE/bin/rebotarm-stop.sh"
+install -m 755 "$REL/scripts/rebotarm-health.sh" "$BASE/bin/rebotarm-health.sh"
+ln -sfn "releases/$RELEASE_ID" "$BASE/current.new"
+mv -T "$BASE/current.new" "$BASE/current"
+
+echo "[OTA] starting..."
+"$BASE/bin/rebotarm-start.sh" 2>&1
+
+echo "[OTA] cleaning up..."
+rm -rf "$TMPDIR"
+
+echo "[OTA] done: $RELEASE_ID"
+""")
+    os.chmod(script, 0o755)
+    return script
+
+
+@router.get("/api/ota/check")
+def get_ota_check(request: Request) -> dict:
+    """Check GitHub for the latest release and compare with current version."""
+    base = _resolve_base()
+    current_id = None
+    current_link = os.path.join(base, "current")
+    if os.path.islink(current_link):
+        current_id = os.path.basename(os.readlink(current_link).rstrip("/"))
+
+    latest = _github_api("releases/latest")
+    if latest is None:
+        return {
+            "ok": False,
+            "error": "no releases found on GitHub",
+            "current": current_id,
+            "latest": None,
+            "has_update": False,
+        }
+
+    latest_tag = latest.get("tag_name", "")
+    has_update = latest_tag and latest_tag != current_id
+    return {
+        "ok": True,
+        "current": current_id,
+        "latest": latest_tag,
+        "has_update": has_update,
+        "latest_name": latest.get("name", ""),
+        "latest_body": latest.get("body", "")[:500],
+    }
+
+
+@router.post("/api/ota/update-from-github")
+async def post_ota_github(
+    request: Request,
+    confirm: str = Form("false"),
+    tag: str = Form(""),
+) -> dict:
+    """Download the latest (or specified) GitHub release and install it."""
+    if confirm != "true":
+        return JSONResponse({"error": "requires confirm=true"}, status_code=400)
+
+    # Gate: no aging or zero-torque
+    aging = request.app.state.aging_runtime.status()
+    if aging.get("status") not in ("inactive", "completed", "held", "error"):
+        return JSONResponse({"error": "aging is active"}, status_code=409)
+    zero = request.app.state.writes.zero_torque_status()
+    if zero.get("status") != "inactive":
+        return JSONResponse({"error": "zero-torque is active"}, status_code=409)
+
+    # Get release info
+    path = f"releases/tags/{tag}" if tag else "releases/latest"
+    release = _github_api(path)
+    if release is None:
+        return JSONResponse({"error": "cannot fetch release from GitHub"}, status_code=502)
+
+    tag_name = release.get("tag_name", "")
+    if not tag_name:
+        return JSONResponse({"error": "release has no tag"}, status_code=400)
+
+    base = _resolve_base()
+    if os.path.exists(os.path.join(base, "releases", tag_name)):
+        return JSONResponse({"error": f"release {tag_name} already installed"}, status_code=409)
+
+    tmpdir = tempfile.mkdtemp(prefix="rebotarm-ota-")
+    tarball = _download_asset(release, tmpdir)
+    if tarball is None:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        return JSONResponse({"error": "no .tar.gz asset in release"}, status_code=400)
+
+    try:
+        _validate_tarball(tarball)
+    except ValueError as exc:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        return JSONResponse({"error": f"invalid tarball: {exc}"}, status_code=400)
+
+    install_script = _write_install_script(base, tarball, tag_name, tmpdir)
+    subprocess.Popen(
+        ["sh", install_script],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    logger.info("OTA: installing from GitHub release %s", tag_name)
+    return {
+        "status": "installing",
+        "release_id": tag_name,
+        "message": "OTA update started; service will restart in ~15 seconds",
+    }
 
 @router.get("/api/ota/status")
 def get_ota_status(request: Request) -> dict:
@@ -167,54 +373,7 @@ async def post_ota_update(
 
         logger.info("OTA: validated release %s (%d bytes)", release_id, total)
 
-        # Write the background install script
-        install_script = os.path.join(tmpdir, "install.sh")
-        with open(install_script, "w") as f:
-            f.write(f"""#!/bin/sh
-set -eu
-BASE="{base}"
-TARBALL="{tarball_path}"
-TMPDIR="{tmpdir}"
-RELEASE_ID="{release_id}"
-
-echo "[OTA] stopping service..."
-"$BASE/bin/rebotarm-stop.sh" 2>/dev/null || true
-sleep 1
-
-echo "[OTA] extracting release $RELEASE_ID..."
-mkdir -p "$BASE/releases"
-EXTRACT_DIR="$TMPDIR/extract"
-mkdir -p "$EXTRACT_DIR"
-tar -xzf "$TARBALL" -C "$EXTRACT_DIR"
-
-# Move into releases
-if [ -e "$BASE/releases/$RELEASE_ID" ]; then
-    echo "[OTA] ERROR: release already exists"
-    rm -rf "$TMPDIR"
-    exit 1
-fi
-mv "$EXTRACT_DIR" "$BASE/releases/$RELEASE_ID"
-REL="$BASE/releases/$RELEASE_ID"
-
-echo "[OTA] installing server package..."
-"$BASE/shared/venv/bin/pip" install --disable-pip-version-check --quiet "$REL/server"
-
-echo "[OTA] activating release..."
-install -m 755 "$REL/scripts/rebotarm-start.sh"  "$BASE/bin/rebotarm-start.sh"
-install -m 755 "$REL/scripts/rebotarm-stop.sh"   "$BASE/bin/rebotarm-stop.sh"
-install -m 755 "$REL/scripts/rebotarm-health.sh" "$BASE/bin/rebotarm-health.sh"
-ln -sfn "releases/$RELEASE_ID" "$BASE/current.new"
-mv -T "$BASE/current.new" "$BASE/current"
-
-echo "[OTA] starting service..."
-"$BASE/bin/rebotarm-start.sh" 2>&1
-
-echo "[OTA] cleaning up..."
-rm -rf "$TMPDIR"
-
-echo "[OTA] done: $RELEASE_ID"
-""")
-        os.chmod(install_script, 0o755)
+        install_script = _write_install_script(base, tarball_path, release_id, tmpdir)
 
         # Launch in background
         subprocess.Popen(
