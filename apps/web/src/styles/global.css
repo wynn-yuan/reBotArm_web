@@ -1,3 +1,4 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
 @import './tokens.css';
 @import './components.css';
 
@@ -22,6 +23,25 @@ body {
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeLegibility;
+  /* 左上往右下扩散的漫射灯光：给整块"塑料底盘"一个光源热点 */
+  background-image: radial-gradient(
+    ellipse 90% 70% at 12% -5%,
+    rgba(255, 255, 255, 0.55),
+    rgba(255, 255, 255, 0) 55%
+  );
+  background-attachment: fixed;
+}
+
+/* 塑料微纹：整页叠加 SVG 分形噪声，模拟注塑表面的微观瑕疵 */
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: 2147483647;
+  pointer-events: none;
+  opacity: 0.035;
+  mix-blend-mode: multiply;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='240'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
 }
 
 button,
@@ -56,7 +76,7 @@ h4,
 h5,
 h6 {
   margin: 0;
-  font-weight: 600;
+  font-weight: 700;
   line-height: var(--leading-tight);
   color: var(--text-primary);
 }
@@ -72,10 +92,10 @@ ol {
   list-style: none;
 }
 
-/* 滚动条 */
+/* 滚动条：深灰金属滑块 */
 ::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 10px;
+  height: 10px;
 }
 
 ::-webkit-scrollbar-track {
@@ -83,17 +103,18 @@ ol {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: var(--border-default);
-  border-radius: 4px;
+  background: linear-gradient(90deg, #a3b1c6, #b7c3d4);
+  border-radius: 5px;
+  border: 2px solid var(--bg-base);
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--border-strong);
+  background: #8fa0b5;
 }
 
-/* 焦点环：清晰可见，符合基本无障碍要求 */
+/* 焦点环：安全橙背光，清晰可见，符合无障碍要求 */
 :focus-visible {
-  outline: 2px solid var(--color-primary);
+  outline: 2px solid var(--border-focus);
   outline-offset: 2px;
   border-radius: var(--radius-sm);
 }

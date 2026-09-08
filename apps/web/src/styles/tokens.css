@@ -1,65 +1,71 @@
 /* 设计令牌：颜色、字号、间距、阴影。
    不使用 Tailwind，所有视觉系统从这里取值。
 
-   第二版：克制的浅色工业界面。
-   - 白色主背景 + 浅灰分区，细边框，宽留白，系统字体。
-   - 主操作为中性墨色（#1d1d1f 级），彩色只保留给 在线/警告/危险/信息 状态。
-   - 不使用大面积渐变、玻璃拟态或重阴影。 */
+   第三版：工业拟物（Industrial Skeuomorphism）。
+   - 底盘（chassis）#e0e5ec 哑光塑料，一切元件"安装"其上。
+   - 深度完全由双阴影模拟，光源固定于左上 45°：高光在左上，暗影在右下。
+   - 单一极简色：安全橙 #ff4757 只用于交互触发 / 状态指示 / 告警。
+   - 数字与技术标签一律等宽字体（JetBrains Mono）。 */
 :root {
-  /* ---- 背景层级 ---- */
-  --bg-base: #ffffff;
-  --bg-surface: #ffffff;
-  --bg-surface-2: #f5f5f7;
-  --bg-elevated: #f5f5f7;
-  --bg-inset: #f5f5f7;
-  --bg-overlay: rgba(29, 29, 31, 0.42);
+  /* ---- 背景层级（Level -1 凹陷 → Level +2 浮起） ---- */
+  --bg-base: #e0e5ec;            /* Level 0 底盘塑料 */
+  --bg-surface: #e0e5ec;         /* Level +1 面板基材，与底盘同色，靠阴影塑形 */
+  --bg-surface-2: #d9dfe8;       /* 面板内嵌条（下沉一档的表头/分隔带） */
+  --bg-elevated: #e0e5ec;        /* 按钮等可浮起元件基材 */
+  --bg-inset: #d1d9e6;           /* Level -1 凹陷区：输入框、屏幕、槽 */
+  --bg-overlay: rgba(30, 34, 42, 0.45);
 
-  /* ---- 边框（细） ---- */
-  --border-subtle: #ececf0;
-  --border-default: #d9d9de;
-  --border-strong: #a1a1a6;
-  --border-focus: #1d1d1f;
+  /* ---- 边框（拟物以阴影为主，边框仅保留必要分界） ---- */
+  --border-subtle: rgba(163, 177, 198, 0.35);
+  --border-default: rgba(174, 188, 204, 0.55);
+  --border-strong: #a3b1c6;
+  --border-focus: #ff4757;
 
   /* ---- 文字 ---- */
-  --text-primary: #1d1d1f;
-  --text-secondary: #515154;
-  --text-tertiary: #86868b;
-  --text-disabled: #bcbcc2;
+  --text-primary: #2d3436;       /* 炭墨 */
+  --text-secondary: #4a5568;     /* 板岩灰，标签/说明 */
+  --text-tertiary: #5c6b7b;      /* 次要元数据 */
+  --text-disabled: #9aa6b5;
   --text-inverse: #ffffff;
 
-  /* ---- 主操作（中性墨色，不是品牌彩） ---- */
-  --color-primary: #1d1d1f;
-  --color-primary-hover: #3a3a3c;
-  --color-primary-active: #000000;
-  --color-primary-dim: #f5f5f7;
-  --color-primary-border: #d9d9de;
+  /* ---- 主操作（安全橙，交互触发器专属） ---- */
+  --color-primary: #ff4757;
+  --color-primary-hover: #ff5b6a;
+  --color-primary-active: #e63946;
+  --color-primary-dim: rgba(255, 71, 87, 0.1);
+  --color-primary-border: rgba(255, 71, 87, 0.45);
 
   /* ---- 状态语义色（仅用于在线/警告/危险/信息） ---- */
-  --color-online-dim: rgba(16, 124, 51, 0.08);
-  --color-online-border: rgba(16, 124, 51, 0.35);
+  --color-online-dim: rgba(22, 163, 74, 0.1);
+  --color-online-border: rgba(22, 163, 74, 0.4);
 
-  --color-warning: #b25e00;
-  --color-warning-dim: rgba(178, 94, 0, 0.08);
-  --color-warning-border: rgba(178, 94, 0, 0.35);
+  --color-warning: #d97706;
+  --color-warning-dim: rgba(217, 119, 6, 0.1);
+  --color-warning-border: rgba(217, 119, 6, 0.4);
 
-  --color-danger: #c41e2f;
-  --color-danger-hover: #a51626;
-  --color-danger-dim: rgba(196, 30, 47, 0.08);
-  --color-danger-border: rgba(196, 30, 47, 0.35);
+  --color-danger: #c8394c;
+  --color-danger-hover: #a92f40;
+  --color-danger-dim: rgba(200, 57, 76, 0.1);
+  --color-danger-border: rgba(200, 57, 76, 0.4);
 
-  --color-info: #0060c6;
-  --color-info-dim: rgba(0, 96, 198, 0.08);
-  --color-info-border: rgba(0, 96, 198, 0.35);
+  --color-info: #0284c7;
+  --color-info-dim: rgba(2, 132, 199, 0.1);
+  --color-info-border: rgba(2, 132, 199, 0.4);
 
-  /* ---- 状态徽标取值 ---- */
-  --status-online: #107c33;
-  --status-busy: #b25e00;
-  --status-offline: #86868b;
-  --status-error: #c41e2f;
-  --status-ok: #107c33;
-  --status-warn: #b25e00;
+  /* TopBar 内联样式引用过但此前未定义的令牌 */
+  --color-success: #16a34a;
+  --color-success-dim: rgba(22, 163, 74, 0.1);
+  --color-bg-inset: #d1d9e6;
 
-  /* ---- 间距（更宽，留白更足） ---- */
+  /* ---- 状态徽标取值（LED 色） ---- */
+  --status-online: #16a34a;
+  --status-busy: #d97706;
+  --status-offline: #6b7a8d;
+  --status-error: #c8394c;
+  --status-ok: #16a34a;
+  --status-warn: #d97706;
+
+  /* ---- 间距（沿用既有尺度） ---- */
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 12px;
@@ -82,42 +88,53 @@
   --font-4xl: 32px;
 
   /* ---- 行高 ---- */
-  --leading-tight: 1.2;
+  --leading-tight: 1.15;
   --leading-snug: 1.4;
-  --leading-normal: 1.55;
+  --leading-normal: 1.6;
 
-  /* ---- 字体（系统字体栈） ---- */
-  --font-base: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
-    'Microsoft YaHei', 'Hiragino Sans GB', Roboto, 'Helvetica Neue', Arial, sans-serif;
-  --font-mono: 'SF Mono', 'Cascadia Code', 'JetBrains Mono', Consolas,
-    'Roboto Mono', Menlo, monospace;
+  /* ---- 字体（Inter 正文 + JetBrains Mono 技术标签，离线时回退到系统栈） ---- */
+  --font-base: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI',
+    'PingFang SC', 'Microsoft YaHei', 'Hiragino Sans GB', Roboto,
+    'Helvetica Neue', Arial, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Roboto Mono', 'SF Mono', 'Cascadia Code',
+    Consolas, Menlo, monospace;
 
-  /* ---- 圆角（克制使用） ---- */
-  --radius-sm: 4px;
-  --radius-md: 6px;
-  --radius-lg: 10px;
+  /* ---- 圆角（软弧，模拟注塑塑料而非锐利金属） ---- */
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 24px;
+  --radius-full: 9999px;
 
-  /* ---- 阴影（克制，极浅） ---- */
-  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.05);
-  --shadow-2: 0 1px 3px rgba(0, 0, 0, 0.08), 0 4px 12px rgba(0, 0, 0, 0.04);
-  --shadow-modal: 0 6px 24px rgba(0, 0, 0, 0.16), 0 2px 6px rgba(0, 0, 0, 0.08);
+  /* ---- 拟物双影系统（核心视觉签名，光源固定左上 45°） ---- */
+  --shadow-1: 4px 4px 8px #babecc, -4px -4px 8px #ffffff;         /* 迷你抬升 */
+  --shadow-card: 8px 8px 16px #babecc, -8px -8px 16px #ffffff;     /* 面板/卡片 */
+  --shadow-floating: 12px 12px 24px #babecc, -12px -12px 24px #ffffff,
+    inset 1px 1px 0 rgba(255, 255, 255, 0.5);                      /* 浮起控制元件 */
+  --shadow-2: var(--shadow-floating);
+  --shadow-pressed: inset 6px 6px 12px #babecc, inset -6px -6px 12px #ffffff;
+  --shadow-recessed: inset 4px 4px 8px #babecc, inset -4px -4px 8px #ffffff;
+  --shadow-modal: 16px 16px 32px #babecc, -16px -16px 24px #ffffff;
+  --shadow-sharp: 4px 4px 8px rgba(0, 0, 0, 0.15),
+    -1px -1px 1px rgba(255, 255, 255, 0.8);
+  --shadow-glow: 0 0 10px 2px rgba(255, 71, 87, 0.55);
 
   /* ---- 布局 ---- */
-  --topbar-height: 56px;
-  --pagenav-height: 44px;
+  --topbar-height: 64px;
+  --pagenav-height: 48px;
   --banner-height: 32px;
   --content-max-width: 1440px;
 
-  /* ---- 图表与三维场景（浅色适配） ---- */
-  --chart-axis: #d9d9de;
-  --chart-grid: #ececf0;
-  --chart-text: #86868b;
-  --chart-text-strong: #515154;
-  --scene-bg: #f5f5f7;
-  --scene-grid-cell: #d8d8dc;
-  --scene-grid-section: #b9b9c0;
+  /* ---- 图表与三维场景（浅色机器适配） ---- */
+  --chart-axis: #a3b1c6;
+  --chart-grid: #cfd7e3;
+  --chart-text: #6b7a8d;
+  --chart-text-strong: #4a5568;
+  --scene-bg: #c9d2df;           /* 场景：凹陷屏面，略深 */
+  --scene-grid-cell: #aab6c6;
+  --scene-grid-section: #8fa0b5;
 
-  /* ---- 动效 ---- */
-  --transition-fast: 120ms ease;
-  --transition-base: 160ms ease;
+  /* ---- 动效（机械弹簧 + 轻微回弹） ---- */
+  --transition-fast: 150ms cubic-bezier(0.175, 0.885, 0.32, 1.275);
+  --transition-base: 300ms cubic-bezier(0.22, 0.61, 0.36, 1);
 }

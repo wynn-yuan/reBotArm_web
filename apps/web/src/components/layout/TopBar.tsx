@@ -161,6 +161,11 @@ export function TopBar({ onEmergencyClick }: Props) {
       <div className="topbar-brand">
         <div className="topbar-brand-mark">B</div>
         <span>reBotArm 控制台</span>
+        <span
+          className={`led ${connected ? 'led--online' : emergency ? 'led--alert' : 'led--idle'}`}
+          title={connected ? '已连接' : emergency ? '紧急失能' : '未连接'}
+          aria-hidden="true"
+        />
       </div>
 
       <div className="topbar-mode">
