@@ -9,6 +9,7 @@ interface OtaCheckResult {
   ok: boolean;
   error?: string;
   current?: string;
+  current_known?: boolean;
   latest?: string;
   has_update?: boolean;
   latest_name?: string;
@@ -160,7 +161,7 @@ export function TopBar({ onEmergencyClick }: Props) {
     <header className="topbar app-topbar" role="banner">
       <div className="topbar-brand">
         <div className="topbar-brand-mark">B</div>
-        <span>reBotArm 控制台</span>
+        <span>Rebot控制台</span>
         <span
           className={`led ${connected ? 'led--online' : emergency ? 'led--alert' : 'led--idle'}`}
           title={connected ? '已连接' : emergency ? '紧急失能' : '未连接'}
@@ -250,11 +251,15 @@ export function TopBar({ onEmergencyClick }: Props) {
                   <div className="state-box__desc">有新版本可用</div>
                 </div>
               )}
-              {!otaStatus.has_update && otaStatus.latest && (
+              {!otaStatus.has_update && otaStatus.latest && (otaStatus.current_known ? (
                 <div className="state-box" style={{ background: 'var(--color-success-dim)', borderColor: 'var(--color-success)' }}>
                   <div className="state-box__desc">已是最新版本</div>
                 </div>
-              )}
+              ) : (
+                <div className="state-box" style={{ background: 'var(--color-warning-dim)', borderColor: 'var(--color-warning)' }}>
+                  <div className="state-box__desc">无法确认当前版本，未能判断是否有更新</div>
+                </div>
+              ))}
             </div>
           )}
           {otaError && <div className="state-box state-box--error"><div className="state-box__desc">{otaError}</div></div>}

@@ -22,8 +22,8 @@ export const CONTROL_MODE_LABEL: Record<ControlMode, string> = {
 };
 
 // ===== 电机 / 关节 =====
-// 1..6 是 6 个旋转关节，7 是夹爪
-export type MotorId = 1 | 2 | 3 | 4 | 5 | 6 | 7;
+// 1..6 是 6 个旋转关节，7 是夹爪（B601 历史布局；通用平台以机型配置为准）
+export type MotorId = number;
 export type MotorStatus = 'idle' | 'running' | 'fault' | 'disabled';
 
 // 关节轴类型：J1 yaw / J2-J3 pitch / J4 roll / J5 pitch / J6 roll / Gripper 开合
@@ -473,6 +473,67 @@ export interface MitGainChange {
   fromKd: number;
   toKp: number;
   toKd: number;
+}
+
+// ===== 机型模型（镜像 GET /api/models；后端注册表是唯一真源） =====
+
+/** 单个旋转关节的配置（来自机型 model.yaml） */
+export interface MotorParam {
+  id: number;
+  name: string;               // 例如 J1
+  label: string;              // 中文描述，如 "基座旋转"
+  axis: JointAxis;
+  vendor: string;             // robstride / damiao / ...
+  model: string;              // 电机型号，如 rs-06
+  urdfName?: string;          // URDF 关节名；缺省 joint{id}
+  positionLimit: [number, number] | null;  // 弧度限位
+  mitKp: number | null;
+  mitKd: number | null;
+}
+
+/** 夹爪（可选）配置；left/right 开合关节名 */
+export interface GripperConfig {
+  id: number;
+  name: string;
+  label: string;
+  axis: JointAxis;
+  vendor: string;
+  model: string;
+  positionLimit: [number, number] | null;
+  mitKp: number | null;
+  mitKd: number | null;
+  leftJoint: string;
+  rightJoint: string;
+}
+
+/** 一台机械臂机型的完整公共配置 */
+export interface ArmModel {
+  armId: string;
+  name: string;
+  vendor: string;
+  hostId: number;
+  /** 旋转关节数（不含夹爪） */
+  jointCount: number;
+  /** 旋转关节电机 ID（不含夹爪） */
+  motorIds: number[];
+  /** 夹爪电机 ID；无夹爪为 null */
+  gripperId: number | null;
+  modelScale: number;
+  modelRotationX: number;
+  modelPosition: [number, number, number];
+  motors: MotorParam[];
+  gripper: GripperConfig | null;
+}
+
+/** 完整链路电机 ID（旋转关节 + 夹爪）：遥测期望 ID 与动作中心关节数都从这里来。 */
+export function armJointIds(arm: ArmModel | null): number[] {
+  if (!arm) return [1, 2, 3, 4, 5, 6, 7]; // B601 历史缺省（测试/降级）
+  return [...arm.motorIds, ...(arm.gripperId != null ? [arm.gripperId] : [])];
+}
+
+/** 完整链路关节数（含夹爪）。 */
+export function armJointCount(arm: ArmModel | null): number {
+  return armJointIds(arm).length;
 }
 
 // ===== 工具：会话 =====

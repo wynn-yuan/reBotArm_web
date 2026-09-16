@@ -3,6 +3,9 @@
 Contract:
 
     GET  /api/health             service health
+    GET  /api/models            registered arm models + active arm_id
+    GET  /api/models/active     active arm model
+    POST /api/models/active     switch active arm (409 unless disconnected)
     GET  /api/robot/connection   latest scan result (or initial state)
     POST /api/robot/scan         run a full serial scan (409 while one runs)
     POST /api/robot/disconnect   clear service state (blocked in zero-torque mode)
@@ -18,6 +21,9 @@ lifecycle. The mechanical-zero endpoint is separately gated.
 
 from __future__ import annotations
 
+import json
+from dataclasses import replace
+from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, Request, WebSocket
@@ -25,11 +31,13 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from . import SERVICE_NAME, __version__
-from .config import ADAPTER_SIMULATION
 from .aging_logs import AgingLogError
 from .aging_recorder import AgingRecorderError
-from .aging_runtime import AgingRuntime, AgingRuntimeError
-from .models import utc_now_iso
+from .aging_runtime import AgingRuntimeError
+from .arm_registry import ArmRegistryError, config_root_for, load_arm_configs
+from .config import ADAPTER_SIMULATION, DEFAULT_MIT_KD, DEFAULT_MIT_KP
+from .models import STATUS_DISCONNECTED, utc_now_iso
+from .scanners import create_scanner
 from .service import BusBusyError, ScanInProgressError, ZeroTorqueBusyError
 from .telemetry import stream_simulation_telemetry
 from .writes import WriteController, WriteOpError
@@ -291,10 +299,7 @@ def post_aging_action(request: Request, body: AgingActionRequest):
     Persistence itself never schedules, validates, or moves a device.
     """
     try:
-        AgingRuntime._validate(
-            body.action,
-            {"loop_mode": "count", "loop_count": 1, "interval_sec": 0},
-        )
+        request.app.state.aging_runtime.validate_draft(body.action)
         saved = _aging_store(request).save_action(body.action)
         return {"action": saved}
     except AgingLogError as exc:
@@ -490,6 +495,190 @@ def post_disconnect(request: Request) -> dict:
             status_code=409,
             content={"error": {"code": "zero_torque_active", "message": str(exc)}},
         )
+
+
+# ---- 机型（激活机型是后端状态；只在 disconnected 后可切换）---------
+
+class ActiveModelRequest(BaseModel):
+    arm_id: str
+
+
+def _registered_arms(request: Request) -> list:
+    settings = getattr(request.app.state, "settings", None)
+    root = config_root_for(getattr(settings, "web_dist_dir", "") if settings else "")
+    return list(load_arm_configs(root=root))
+
+
+def _active_arm(request: Request):
+    return getattr(request.app.state, "active_arm", None)
+
+
+@router.get("/api/models")
+def get_models(request: Request) -> dict:
+    """列出注册表全部机型及当前激活机型的 arm_id（前端首页用）。"""
+    try:
+        arms = _registered_arms(request)
+    except ArmRegistryError as exc:
+        return JSONResponse(
+            status_code=404,
+            content={"error": {"code": "arm_config_error", "message": str(exc)}},
+        )
+    active = _active_arm(request)
+    return {
+        "models": [arm.public_dict() for arm in arms],
+        "active_arm_id": active.arm_id if active is not None else None,
+    }
+
+
+@router.get("/api/models/active")
+def get_active_model(request: Request) -> dict:
+    active = _active_arm(request)
+    if active is None:
+        return JSONResponse(
+            status_code=404,
+            content={
+                "error": {
+                    "code": "no_active_arm",
+                    "message": "no active arm model (settings.arm is not set)",
+                }
+            },
+        )
+    return {"model": active.public_dict(), "arm_id": active.arm_id}
+
+
+@router.post("/api/models/active")
+def post_active_model(request: Request, body: ActiveModelRequest) -> dict:
+    """切换激活机型（持久化到可选状态文件 + 换出下一次扫描用的 scanner）。
+
+    连接未断开时返回 409 ``must_disconnect_first``。切换只影响下一次
+    ``run_scan``，绝不触碰已释放的旧 scanner。
+    """
+    status = request.app.state.service.snapshot()["status"]
+    if status != STATUS_DISCONNECTED:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "error": {
+                    "code": "must_disconnect_first",
+                    "message": (
+                        f"cannot switch arm model while connection is {status}; "
+                        "disconnect first"
+                    ),
+                }
+            },
+        )
+    try:
+        arms = _registered_arms(request)
+    except ArmRegistryError as exc:
+        return JSONResponse(
+            status_code=404,
+            content={"error": {"code": "arm_config_error", "message": str(exc)}},
+        )
+    arm = next((a for a in arms if a.arm_id == body.arm_id), None)
+    if arm is None:
+        return JSONResponse(
+            status_code=404,
+            content={
+                "error": {
+                    "code": "unknown_arm",
+                    "message": f"arm model {body.arm_id!r} is not registered",
+                }
+            },
+        )
+    settings = getattr(request.app.state, "settings", None)
+    if settings is not None and settings.arm_state_file:
+        try:
+            Path(settings.arm_state_file).write_text(
+                json.dumps({"arm_id": arm.arm_id}), encoding="utf-8"
+            )
+        except OSError as exc:
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "error": {
+                        "code": "state_file_write_failed",
+                        "message": str(exc),
+                    }
+                },
+            )
+    _apply_arm(request, arm)
+    return {"model": arm.public_dict(), "arm_id": arm.arm_id}
+
+
+def _apply_arm(request: Request, arm) -> None:
+    """把机型切换应用到运行时（settings/service/scanner），供 POST/DELETE 共用。"""
+    settings = getattr(request.app.state, "settings", None)
+    request.app.state.active_arm = arm
+    request.app.state.active_arm_id = arm.arm_id
+    if settings is None:
+        return request
+    mit_kp = tuple(
+        v if v is not None else d
+        for v, d in zip(arm.joint_mit_kp, DEFAULT_MIT_KP)
+    )
+    mit_kd = tuple(
+        v if v is not None else d
+        for v, d in zip(arm.joint_mit_kd, DEFAULT_MIT_KD)
+    )
+    switched = replace(
+        settings,
+        arm=arm,
+        arm_id=arm.arm_id,
+        expected_ids=arm.joint_ids,
+        mit_kp=mit_kp,
+        mit_kd=mit_kd,
+    )
+    request.app.state.service.replace_scanner(
+        create_scanner(switched), arm.joint_ids
+    )
+    return request
+
+
+@router.delete("/api/models/active")
+def delete_active_model(request: Request) -> dict:
+    """取消激活：清持久化状态文件，回落出厂默认机型（env REBOT_ARM_ID 或首个注册机型）。
+
+    与切换一样要求连接已断开（409 ``must_disconnect_first``）。
+    """
+    status = request.app.state.service.snapshot()["status"]
+    if status != STATUS_DISCONNECTED:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "error": {
+                    "code": "must_disconnect_first",
+                    "message": (
+                        f"cannot deactivate arm model while connection is {status}; "
+                        "disconnect first"
+                    ),
+                }
+            },
+        )
+    settings = getattr(request.app.state, "settings", None)
+    if settings is not None and settings.arm_state_file:
+        try:
+            Path(settings.arm_state_file).unlink(missing_ok=True)
+        except OSError as exc:
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "error": {
+                        "code": "state_file_clear_failed",
+                        "message": str(exc),
+                    }
+                },
+            )
+    try:
+        arms = _registered_arms(request)
+    except ArmRegistryError as exc:
+        return JSONResponse(
+            status_code=404,
+            content={"error": {"code": "arm_config_error", "message": str(exc)}},
+        )
+    default_id = settings.default_arm_id if settings is not None else ""
+    arm = next((a for a in arms if a.arm_id == default_id), arms[0])
+    _apply_arm(request, arm)
+    return {"model": arm.public_dict(), "arm_id": arm.arm_id}
 
 
 def _manual_action(request: Request, action: str, body: ManualActionRequest):

@@ -8,11 +8,22 @@ fixed on the backend — API clients cannot influence either.
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Mapping, Optional
+
+from .arm_registry import (
+    ArmModel,
+    ArmRegistryError,
+    config_root_for,
+    load_arm_by_id,
+    load_arm_configs,
+)
+from .models import EXPECTED_MOTOR_IDS
 
 ADAPTER_SIMULATION = "simulation"
 ADAPTER_MOTORBRIDGE = "motorbridge"
@@ -24,9 +35,6 @@ _SUPPORTED_ADAPTERS = (ADAPTER_SIMULATION, ADAPTER_MOTORBRIDGE)
 CHANNEL_PATTERN = re.compile(r"^can[0-9]+$")
 
 DEFAULT_CHANNEL = "can0"
-#: Expected motor IDs are a backend constant. They are never taken from a
-#: request and never configurable at runtime.
-DEFAULT_EXPECTED_MOTOR_IDS = (1, 2, 3, 4, 5, 6, 7)
 DEFAULT_HOST_ID = 0xFD  # robstride host / feedback ID
 #: Per-ping timeout passed to the SDK (``robstride_ping_host_id``). 500 ms is
 #: the SDK/vendor default; values are clamped to [MIN, MAX] so a scan of 7
@@ -132,13 +140,21 @@ def _as_bool(raw: str) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _parse_mit_gains(env_name: str, raw: str, default: tuple[float, ...]) -> tuple[float, ...]:
-    """Parse a comma-separated MIT gain list (exactly seven positive values)."""
+def _parse_mit_gains(
+    env_name: str,
+    raw: str,
+    default: tuple[float, ...],
+    count: Optional[int] = None,
+) -> tuple[float, ...]:
+    """Parse a comma-separated MIT gain list (exactly *count* positive values)."""
     if not isinstance(raw, str) or not raw.strip():
         return default
+    count = count if count is not None else len(default)
     parts = [part.strip() for part in raw.split(",")]
-    if len(parts) != 7 or any(not part for part in parts):
-        raise ConfigError(f"{env_name} must contain exactly seven comma-separated values")
+    if len(parts) != count or any(not part for part in parts):
+        raise ConfigError(
+            f"{env_name} must contain exactly {count} comma-separated values"
+        )
     values: list[float] = []
     for part in parts:
         try:
@@ -186,7 +202,7 @@ class Settings:
 
     adapter: str = ADAPTER_SIMULATION
     channel: str = DEFAULT_CHANNEL
-    expected_ids: tuple[int, ...] = DEFAULT_EXPECTED_MOTOR_IDS
+    expected_ids: tuple[int, ...] = EXPECTED_MOTOR_IDS
     host_id: int = DEFAULT_HOST_ID
     ping_timeout_ms: int = DEFAULT_PING_TIMEOUT_MS
     telemetry_hz: float = DEFAULT_TELEMETRY_HZ
@@ -205,7 +221,7 @@ class Settings:
     allow_aging_write: bool = DEFAULT_ALLOW_AGING_WRITE
     #: Bounded backend-owned zero-torque command loop frequency.
     zero_torque_hz: float = DEFAULT_ZERO_TORQUE_HZ
-    sim_found_ids: tuple[int, ...] = DEFAULT_EXPECTED_MOTOR_IDS
+    sim_found_ids: tuple[int, ...] = EXPECTED_MOTOR_IDS
     sim_scan_delay_s: float = 0.0
     sim_fatal_error: bool = False
     cors_origins: tuple[str, ...] = ()
@@ -233,6 +249,13 @@ class Settings:
     home_verify_mode: str = DEFAULT_HOME_VERIFY_MODE
     #: Require all 7 motor IDs for scan to report "connected".
     require_all_motors: bool = DEFAULT_REQUIRE_ALL_MOTORS
+    #: 激活机型（注册表解析；运行时 expected_ids / MIT 增益从 arm 派生）。
+    #: ``arm is None`` 仅出现在测试直接构造 Settings 的场合；生产走 load_settings。
+    arm_id: str = ""
+    #: 出厂默认机型 ID（env REBOT_ARM_ID 或首个注册机型）；取消激活时回落。
+    default_arm_id: str = ""
+    arm: Optional[ArmModel] = None
+    arm_state_file: str = ""
     log_json: bool = True
     log_level: str = "INFO"
 
@@ -323,8 +346,36 @@ def load_settings(env: Optional[Mapping[str, str]] = None) -> Settings:
         raise ConfigError("REBOT_ZERO_TORQUE_HZ must be finite")
     zero_torque_hz = max(MIN_ZERO_TORQUE_HZ, min(MAX_ZERO_TORQUE_HZ, zero_torque_hz))
 
+    # ---- 机型注册表：激活机型（平台唯一真源，fail closed）----
+    # 配置根随部署形态走：web_dist_dir（部署，model.yaml 随前端 dist 打包）
+    # → <dist>/robots；否则开发路径 packages/arm-models/robots。
+    web_dist_dir = get("REBOT_WEB_DIST_DIR", DEFAULT_WEB_DIST_DIR)
+    arm_id = get("REBOT_ARM_ID", "")
+    default_arm_id = arm_id  # 取消激活回落的出厂默认（env 指定或首个注册机型）
+    arm_state_file = get("REBOT_ARM_STATE_FILE", "")
+    if arm_state_file:
+        try:
+            state = json.loads(Path(arm_state_file).read_text(encoding="utf-8"))
+            if isinstance(state, dict) and state.get("arm_id"):
+                arm_id = str(state["arm_id"])
+        except (OSError, ValueError):
+            pass  # 状态文件不可读/损坏 → 回落到 env/默认
+    try:
+        arm_root = config_root_for(web_dist_dir)
+        if arm_id:
+            arm = load_arm_by_id(arm_id, root=arm_root)
+        else:
+            arm = load_arm_configs(root=arm_root)[0]
+            arm_id = arm.arm_id
+    except ArmRegistryError as exc:
+        raise ConfigError(f"cannot resolve active arm model: {exc}") from None
+    if not default_arm_id:
+        default_arm_id = arm.arm_id
+
     found_raw = get("REBOT_SIM_FOUND_IDS")
-    sim_found_ids = _parse_sim_found_ids(found_raw) if found_raw else DEFAULT_EXPECTED_MOTOR_IDS
+    sim_found_ids = (
+        _parse_sim_found_ids(found_raw) if found_raw else arm.joint_ids
+    )
 
     try:
         sim_scan_delay_s = max(0.0, min(60.0, float(get("REBOT_SIM_SCAN_DELAY_S", "0"))))
@@ -336,11 +387,6 @@ def load_settings(env: Optional[Mapping[str, str]] = None) -> Settings:
     cors_origins = _parse_cors_origins(get("REBOT_CORS_ORIGINS", ""))
 
     host = get("REBOT_HOST", DEFAULT_HTTP_HOST)
-
-    # Optional same-origin static hosting (pre-built Vite dist). Default
-    # empty = disabled. Existence/shape validation happens at app creation
-    # (staticweb.validate_web_root) so a bad value fails closed at startup.
-    web_dist_dir = get("REBOT_WEB_DIST_DIR", DEFAULT_WEB_DIST_DIR)
 
     # Restricted aging-log persistence.  The root is intentionally not
     # defaulted to a writable application directory: empty means disabled.
@@ -383,9 +429,22 @@ def load_settings(env: Optional[Mapping[str, str]] = None) -> Settings:
     if trajectory_dir and not os.path.isabs(trajectory_dir):
         raise ConfigError("REBOT_TRAJECTORY_DIR must be an absolute path")
 
-    # MIT position-servo gains for aging motion (J1..J6 + gripper).
-    mit_kp = _parse_mit_gains("REBOT_MIT_KP", get("REBOT_MIT_KP", ""), DEFAULT_MIT_KP)
-    mit_kd = _parse_mit_gains("REBOT_MIT_KD", get("REBOT_MIT_KD", ""), DEFAULT_MIT_KD)
+    # MIT position-servo gains for aging motion (full chain: J1..J6 + gripper).
+    # 默认值直接从激活机型的关节配置取；未配置的关节才回落历史 B601 常量。
+    cov_kp = tuple(
+        v if v is not None else d
+        for v, d in zip(arm.joint_mit_kp, DEFAULT_MIT_KP)
+    )
+    cov_kd = tuple(
+        v if v is not None else d
+        for v, d in zip(arm.joint_mit_kd, DEFAULT_MIT_KD)
+    )
+    mit_kp = _parse_mit_gains(
+        "REBOT_MIT_KP", get("REBOT_MIT_KP", ""), cov_kp, count=len(arm.joint_ids)
+    )
+    mit_kd = _parse_mit_gains(
+        "REBOT_MIT_KD", get("REBOT_MIT_KD", ""), cov_kd, count=len(arm.joint_ids)
+    )
 
     # Gravity compensation: default OFF (fail closed).
     gravity_compensation_enable = _as_bool(
@@ -394,7 +453,8 @@ def load_settings(env: Optional[Mapping[str, str]] = None) -> Settings:
     gravity_compensation_factor = _parse_mit_gains(
         "REBOT_GRAVITY_COMPENSATION_FACTOR",
         get("REBOT_GRAVITY_COMPENSATION_FACTOR", ""),
-        DEFAULT_GRAVITY_COMPENSATION_FACTOR,
+        tuple(1.0 for _ in range(arm.gravity_revolute_count)),
+        count=arm.gravity_revolute_count,
     )
 
     try:
@@ -429,8 +489,8 @@ def load_settings(env: Optional[Mapping[str, str]] = None) -> Settings:
     return Settings(
         adapter=adapter,
         channel=channel,
-        # Fixed on the backend; an env var or request cannot change this.
-        expected_ids=DEFAULT_EXPECTED_MOTOR_IDS,
+        # 按激活机型的完整链路（转动关节 + 夹爪）。
+        expected_ids=arm.joint_ids,
         host_id=host_id,
         ping_timeout_ms=ping_timeout_ms,
         telemetry_hz=telemetry_hz,
@@ -459,6 +519,10 @@ def load_settings(env: Optional[Mapping[str, str]] = None) -> Settings:
         home_tolerance_rad=home_tolerance_rad,
         home_verify_mode=home_verify_mode,
         require_all_motors=require_all_motors,
+        arm_id=arm_id,
+        default_arm_id=default_arm_id,
+        arm=arm,
+        arm_state_file=arm_state_file,
         log_json=log_json,
         log_level=log_level,
     )

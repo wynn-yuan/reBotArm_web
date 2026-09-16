@@ -15,6 +15,7 @@ from typing import Any, Mapping, Optional
 
 from .aging_logs import AgingLogStore
 from .models import utc_now_iso
+from .timesync import clock_now_iso
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +104,7 @@ class AgingRecorder:
             daemon=True,
         )
         try:
-            self._store.append_event(info.relative_path, {"at": utc_now_iso(), "type": "started"})
+            self._store.append_event(info.relative_path, {"at": clock_now_iso(), "type": "started"})
         except Exception as exc:
             with self._lock:
                 self._status = "error"
@@ -215,7 +216,7 @@ class AgingRecorder:
             try:
                 self._store.append_event(
                     session_path,
-                    {"at": utc_now_iso(), "type": "stopped", "error": error},
+                    {"at": clock_now_iso(), "type": "stopped", "error": error},
                 )
             except Exception as exc:
                 error = error or f"{type(exc).__name__}: {exc}"

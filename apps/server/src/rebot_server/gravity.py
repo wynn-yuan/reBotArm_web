@@ -22,10 +22,6 @@ import numpy as np
 # Gravity vector in the world frame (Z-up URDF convention: gravity is -Z).
 _GRAVITY = np.array([0.0, 0.0, -9.81], dtype=np.float64)
 
-# Only 6 revolute joints carry gravity torque.  The gripper (J7) is a
-# prismatic joint and does not produce a gravity torque about its axis.
-_REVOLUTE_JOINT_COUNT = 6
-
 
 def _rpy_to_rotation(rpy: Sequence[float]) -> np.ndarray:
     """Build a 3×3 rotation matrix from roll-pitch-yaw (fixed-axis X-Y-Z)."""
@@ -94,11 +90,24 @@ class GravityModel:
         self,
         urdf_path: str,
         compensation_factors: Optional[Sequence[float]] = None,
+        revolute_count: int = 6,
+        root_link: str = "link1",
+        joint_count: Optional[int] = None,
     ) -> None:
-        self._joints: list[dict] = []  # ordered J1..J6
-        self._compensation = list(compensation_factors) if compensation_factors else [1.0] * 7
-        if len(self._compensation) != 7:
-            raise ValueError("compensation_factors must have exactly 7 elements")
+        self._joints: list[dict] = []
+        self._revolute_count = revolute_count
+        self._root_link = root_link
+        # 输出向量长度：完整链路（转动关节 + 夹爪）；缺省 = revolute_count + 1
+        # （与历史行为一致：B601 = 6 转动 + 1 夹爪 → 7）。
+        self._joint_count = joint_count if joint_count is not None else revolute_count + 1
+        self._compensation = (
+            list(compensation_factors) if compensation_factors else [1.0] * revolute_count
+        )
+        if len(self._compensation) != revolute_count:
+            raise ValueError(
+                f"compensation_factors must have exactly {revolute_count} elements "
+                f"(the revolute joints), got {len(self._compensation)}"
+            )
         self._parse_urdf(urdf_path)
 
     # ── URDF parsing ──────────────────────────────────────────────────────
@@ -152,8 +161,8 @@ class GravityModel:
             }
 
         # Build the ordered list of revolute joints (J1..J6).
-        # Start from link1, follow the chain.
-        child = "link1"
+        # Start from the configured root link, follow the chain.
+        child = self._root_link
         while child in parent_map:
             parent = parent_map[child]
             ji = joint_info.get(child)
@@ -181,9 +190,10 @@ class GravityModel:
         if last_child:
             self._collect_fixed_links(last_child, parent_map, links, joint_info)
 
-        if len(self._joints) != _REVOLUTE_JOINT_COUNT:
+        if len(self._joints) != self._revolute_count:
             raise ValueError(
-                f"expected {_REVOLUTE_JOINT_COUNT} revolute joints, found {len(self._joints)}"
+                f"expected {self._revolute_count} revolute joints, "
+                f"found {len(self._joints)}"
             )
 
     def _next_child(self, parent_map: dict[str, str], current: str) -> str:
@@ -254,8 +264,10 @@ class GravityModel:
             Gravity torque for each of the 7 motors (N·m, motor side).
             J7 is always 0.0.
         """
-        if len(q) < _REVOLUTE_JOINT_COUNT:
-            raise ValueError(f"expected at least {_REVOLUTE_JOINT_COUNT} joint angles")
+        if len(q) < self._revolute_count:
+            raise ValueError(
+                f"expected at least {self._revolute_count} joint angles"
+            )
 
         # ── Forward kinematics ──────────────────────────────────────────
         # Compute world-frame transforms and COM positions for each link.
@@ -315,13 +327,13 @@ class GravityModel:
         #   τ_i = axis_i · Σ_{j ≥ i} (COM_j_world - joint_i_world) × (m_j × g)
         # where j runs over all links downstream of joint i, including fixed links.
 
-        tau_g = [0.0] * _REVOLUTE_JOINT_COUNT
+        tau_g = [0.0] * self._revolute_count
 
-        for i in range(_REVOLUTE_JOINT_COUNT):
+        for i in range(self._revolute_count):
             moment = np.zeros(3, dtype=np.float64)
 
             # Contribution from revolute links downstream of i
-            for j in range(i, _REVOLUTE_JOINT_COUNT):
+            for j in range(i, self._revolute_count):
                 r = com_world[j] - joint_world[i]
                 moment += np.cross(masses[j] * _GRAVITY, r)
 
@@ -334,10 +346,10 @@ class GravityModel:
             tau_g[i] = float(np.dot(axis_world[i], moment))
 
         # Apply per-joint compensation factors (motor-side torques).
-        tau_g = [tau_g[i] * self._compensation[i] for i in range(_REVOLUTE_JOINT_COUNT)]
+        tau_g = [tau_g[i] * self._compensation[i] for i in range(self._revolute_count)]
 
-        # J7 (gripper) always has zero gravity torque.
-        return tau_g + [0.0]
+        # 非转动关节（夹爪等）重力力矩恒为 0，按完整链路补齐。
+        return tau_g + [0.0] * (self._joint_count - len(tau_g))
 
     def _find_parent_index(self, parent_name: str) -> int:
         """Find the joint index whose child link matches *parent_name*."""

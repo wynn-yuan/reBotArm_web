@@ -95,7 +95,10 @@ import threading
 from typing import Any, Dict, Optional
 
 from .models import STATUS_CONNECTED, utc_now_iso
-from .scanners.motorbridge import MOTOR_MODELS
+from .scanners.motorbridge import (
+    ADD_MOTOR_BY_VENDOR,
+    resolve_motor_model,
+)
 from .sdkcheck import REQUIRED_MOTORBRIDGE_VERSION, import_verified_sdk
 from .service import BusBusyError, ScanInProgressError
 from .telemetry import SOURCE_MOTORBRIDGE, UNITS, joint_from_motor_state, put_latest
@@ -142,11 +145,13 @@ class ActiveReportSession:
         channel: str,
         host_id: int,
         expected_ids,
+        arm=None,
     ) -> None:
         self._module = module
         self._channel = channel
         self._host_id = host_id
         self._expected_ids = tuple(sorted(expected_ids))
+        self._arm = arm
         self._controller: Any = None
         self._motors: Dict[int, Any] = {}
         self._enabled: list = []
@@ -193,14 +198,19 @@ class ActiveReportSession:
 
         try:
             for motor_id in self._expected_ids:
-                model = MOTOR_MODELS.get(motor_id)
-                if model is None:
-                    raise ValueError(
-                        f"no motor model configured for id {motor_id}"
-                    )
-                self._motors[motor_id] = self._controller.add_robstride_motor(
-                    motor_id, self._host_id, model
+                # 第二次注册：与 scanner 一致，按激活机型的厂商分发 add_<vendor>_motor。
+                vendor, model, feedback_id = resolve_motor_model(
+                    self._arm, motor_id, self._host_id
                 )
+                add_motor = getattr(
+                    self._controller, ADD_MOTOR_BY_VENDOR.get(vendor), None
+                )
+                if add_motor is None:
+                    raise ValueError(
+                        f"vendor {vendor!r} has no {vendor} motor "
+                        "registration method in the SDK"
+                    )
+                self._motors[motor_id] = add_motor(motor_id, feedback_id, model)
             for motor_id in self._expected_ids:
                 # The single authorized write — exactly once per motor.
                 self._motors[motor_id].robstride_set_active_report(True)
@@ -669,6 +679,7 @@ class MotorbridgeTelemetryHub:
             self._settings.channel,
             self._settings.host_id,
             self._settings.expected_ids,
+            arm=getattr(self._settings, "arm", None),
         )
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, session.start)

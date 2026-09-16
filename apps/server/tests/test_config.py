@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import json
+import os
+import tempfile
 import unittest
 
 from rebot_server.config import (
     ADAPTER_MOTORBRIDGE,
     ADAPTER_SIMULATION,
-    DEFAULT_EXPECTED_MOTOR_IDS,
     ConfigError,
     load_settings,
     validate_channel,
 )
+from rebot_server.models import EXPECTED_MOTOR_IDS
 
 
 class ChannelValidationTests(unittest.TestCase):
@@ -53,7 +56,7 @@ class LoadSettingsTests(unittest.TestCase):
         # The single authorized motor write is OFF by default (fail closed).
         self.assertFalse(settings.allow_active_report_write)
         self.assertFalse(settings.allow_aging_write)
-        self.assertEqual(settings.sim_found_ids, DEFAULT_EXPECTED_MOTOR_IDS)
+        self.assertEqual(settings.sim_found_ids, EXPECTED_MOTOR_IDS)
         self.assertFalse(settings.sim_fatal_error)
         self.assertEqual(settings.cors_origins, ())
         self.assertEqual(settings.host, "127.0.0.1")
@@ -190,11 +193,41 @@ class LoadSettingsTests(unittest.TestCase):
         )
 
     def test_expected_ids_are_fixed_backend_values(self):
-        # Env vars or requests cannot change the expected motor IDs.
+        # Env vars or requests cannot change the expected motor IDs (they come
+        # from the active arm model).
         settings = load_settings(
             env={"REBOT_EXPECTED_IDS": "1,2", "REBOT_SIM_FOUND_IDS": "1"}
         )
-        self.assertEqual(settings.expected_ids, DEFAULT_EXPECTED_MOTOR_IDS)
+        self.assertEqual(settings.expected_ids, (1, 2, 3, 4, 5, 6, 7))
+
+
+class ActiveArmResolutionTests(unittest.TestCase):
+    def test_defaults_to_first_registered(self):
+        settings = load_settings(env={})
+        self.assertEqual(settings.arm_id, "rebot-b601-rs")
+        self.assertIsNotNone(settings.arm)
+        self.assertEqual(settings.expected_ids, (1, 2, 3, 4, 5, 6, 7))
+
+    def test_unknown_arm_fails_closed(self):
+        with self.assertRaises(ConfigError, msg="no-such-arm"):
+            load_settings(env={"REBOT_ARM_ID": "no-such-arm"})
+
+    def test_env_arm_id_is_honored(self):
+        settings = load_settings(env={"REBOT_ARM_ID": "rebot-b601-rs"})
+        self.assertEqual(settings.arm_id, "rebot-b601-rs")
+        self.assertEqual(settings.arm.arm_id, "rebot-b601-rs")
+
+    def test_state_file_wins_over_env(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            json.dump({"arm_id": "rebot-b601-rs"}, fh)
+            path = fh.name
+        try:
+            settings = load_settings(
+                env={"REBOT_ARM_ID": "no-such", "REBOT_ARM_STATE_FILE": path}
+            )
+            self.assertEqual(settings.arm_id, "rebot-b601-rs")
+        finally:
+            os.unlink(path)
 
 
 if __name__ == "__main__":

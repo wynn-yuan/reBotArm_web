@@ -7,14 +7,15 @@ import { ResizablePanel } from '../common/ResizablePanel';
 import { MetricCard } from '../common/MetricCard';
 import { StatusBadge } from '../common/StatusBadge';
 import { EmptyState } from '../common/EmptyState';
-import { JOINT_TABLE } from '../../data/simulatedTelemetry';
-import { formatDeg, formatNumber } from '../../utils/format';
+import { formatDeg, formatIdRange, formatNumber } from '../../utils/format';
 import {
   GRIPPER_CALIBRATION_NOTE,
   GRIPPER_CALIBRATION_STEPS,
+  armConfigFromModel,
   armJointViews,
   computeRobotJointWrites,
 } from '../../telemetry/jointTransform';
+import { armJointIds } from '../../types';
 import type { WsTelemetryStatus } from '../../types';
 
 /** 遥测新鲜度阈值（与 TelemetryContext 的 STALE_MS 保持一致，仅用于本页展示） */
@@ -50,6 +51,18 @@ export function MonitorPage() {
   const connected = connection.status === 'connected';
   const scanning = connection.scanning;
   const telemetryEnabled = connected && connection.capabilities.telemetry;
+  const activeArm = state.activeArm;
+  // 机型派生：期望电机 ID / 夹爪 ID（缺省 = B601 常量）
+  const expectedIds = useMemo(() => armJointIds(activeArm), [activeArm]);
+  const gripperId = activeArm?.gripper?.id ?? (activeArm ? null : 7);
+  const jointDefById = useMemo(() => {
+    const map = new Map<number, { name: string; label: string }>();
+    if (activeArm) {
+      for (const m of activeArm.motors) map.set(m.id, { name: m.name, label: m.label });
+      if (activeArm.gripper) map.set(activeArm.gripper.id, { name: activeArm.gripper.name, label: activeArm.gripper.label });
+    }
+    return map;
+  }, [activeArm]);
 
   // 页面轻量时钟：使"数据年龄"在帧停止到达时持续更新
   const [now, setNow] = useState(() => Date.now());
@@ -61,10 +74,10 @@ export function MonitorPage() {
   // 映射视图：原始 vs 映射后（ID 1-6）、超限关节、夹爪标定状态（只读纯函数）
   // 注意：所有 hooks 必须在任何提前返回之前无条件执行（Rules of Hooks），
   // 否则连接状态变化（连接/断开切换渲染分支）会因 hooks 数量变化而崩溃。
-  const views = useMemo(() => armJointViews(joints), [joints]);
+  const views = useMemo(() => armJointViews(joints, armConfigFromModel(activeArm)), [joints, activeArm]);
   const mapResult = useMemo(
-    () => (frame ? computeRobotJointWrites(frame.joints) : null),
-    [frame],
+    () => (frame ? computeRobotJointWrites(frame.joints, armConfigFromModel(activeArm)) : null),
+    [frame, activeArm],
   );
 
   // 连接门禁：未连接（或扫描请求在途）时不展示实时反馈，避免把未连接状态
@@ -88,7 +101,7 @@ export function MonitorPage() {
                   ? '扫描请求已发送，等待后端返回（POST /api/robot/scan）。'
                   : connection.error
                     ? `上次连接尝试失败：${connection.error}`
-                    : `请点击顶部「连接机械臂」按钮扫描并连接（${connection.channel} · 期望电机 ID 1–7）。连接成功后，本页监控内容自动可用，无需手动开始。`
+                    : `请点击顶部「连接机械臂」按钮扫描并连接（${connection.channel} · 期望电机 ID ${formatIdRange(expectedIds)}）。连接成功后，本页监控内容自动可用，无需手动开始。`
               }
             />
           </div>
@@ -123,7 +136,7 @@ export function MonitorPage() {
   const ageMs = comm.lastArrivalMs !== null ? Math.max(0, now - comm.lastArrivalMs) : null;
 
   const outIds = mapResult?.outOfLimitIds ?? [];
-  const gripperJoint = joints.find((j) => j.id === 7) ?? null;
+  const gripperJoint = joints.find((j) => j.id === gripperId) ?? null;
 
   return (
     <div className="page">
@@ -267,10 +280,10 @@ export function MonitorPage() {
                 </thead>
                 <tbody>
                   {joints.map((j) => {
-                    const def = JOINT_TABLE.find((d) => d.id === j.id);
+                    const def = jointDefById.get(j.id);
                     const abnormal = j.statusCode !== null && j.statusCode !== 0;
                     const view = views.find((v) => v.id === j.id);
-                    const isGripper = j.id === 7;
+                    const isGripper = gripperId !== null && j.id === gripperId;
                     return (
                       <tr key={j.id}>
                         <td className="mono">{def?.name ?? `M${j.id}`}</td>

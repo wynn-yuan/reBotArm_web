@@ -1,0 +1,32 @@
+# Rebot RS B601 机型配置（后端扫描/老化/重力 + 前端 3D/标签/限位/遥测校验的唯一直观真源）
+# 一款机型 = 一个文件夹 packages/arm-models/robots/<arm_id>/（文件夹名即 arm_id）。
+# 字段与参考工程 reBotArm_control_py/config/rebotarm_rs.yaml 数值一一对应。
+arm_id: rebot-b601-rs
+name: Rebot RS B601
+vendor: robstride
+host_id: 0xFD
+gravity_revolute_count: 6
+root_link: link1
+model_scale: 2.5
+model_rotation_x: -1.5707963267948966
+model_position: [0.0, -1.2, 0.0]
+
+motors:
+  - { id: 1, name: J1, label: 基座旋转,   axis: yaw,   vendor: robstride, model: rs-06, position_limit: [-2.8, 2.8],  mit: { kp: 50.0,  kd: 3.0 } }
+  - { id: 2, name: J2, label: 肩部俯仰,   axis: pitch, vendor: robstride, model: rs-06, position_limit: [0.0, 3.14],   mit: { kp: 150.0, kd: 10.0 } }
+  - { id: 3, name: J3, label: 肘部俯仰,   axis: pitch, vendor: robstride, model: rs-06, position_limit: [0.0, 3.14],   mit: { kp: 150.0, kd: 10.0 } }
+  - { id: 4, name: J4, label: 腕部1旋转,  axis: roll,  vendor: robstride, model: rs-00, position_limit: [-1.57, 1.57], mit: { kp: 50.0,  kd: 5.0 } }
+  - { id: 5, name: J5, label: 腕部2俯仰,  axis: pitch, vendor: robstride, model: rs-00, position_limit: [-1.57, 1.57], mit: { kp: 50.0,  kd: 4.0 } }
+  - { id: 6, name: J6, label: 腕部3旋转,  axis: roll,  vendor: robstride, model: rs-00, position_limit: [-3.14, 3.14], mit: { kp: 50.0,  kd: 4.0 } }
+
+gripper:
+  id: 7
+  name: Gripper
+  label: 夹爪
+  axis: grip
+  vendor: robstride
+  model: rs-00
+  position_limit: [0.0, 3.0]
+  mit: { kp: 50.0, kd: 4.0 }
+  left_joint: joint_left
+  right_joint: joint_right

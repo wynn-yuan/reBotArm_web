@@ -30,8 +30,8 @@
  *    - 遥测帧不含「是否在 URDF 家位完成标零」的信息，前端无法确认 →
  *      按任务要求不得假装已标定，UI 必须如实标注。
  *
- * 4) URDF 限位（packages/robot-description/public/robots/rebot-b601-rs/
- *    model.urdf，与参考项目 urdf/00-arm-rs_asm-v3 完全一致）：
+ * 4) URDF 限位（packages/arm-models/robots/rebot-b601-rs/model.urdf，
+ *    与参考项目 urdf/00-arm-rs_asm-v3 完全一致）：
  *    joint1 [-2.8, 2.8]、joint2 [0, 3.14]、joint3 [0, 3.14]、
  *    joint4 [-1.57, 1.57]、joint5 [-1.57, 1.57]、joint6 [-3.14, 3.14]；
  *    joint_left [0, 0.05] m、joint_right [0, 0.0715] m（prismatic）。
@@ -45,6 +45,8 @@
  *      物理开度在全部源码/配置中均无依据 → 禁止 clamp01 等臆测映射；
  *      只展示原始弧度，暂停夹爪模型动画，并给出手动标定步骤。
  */
+
+import type { ArmModel } from '../types';
 
 export const ARM_JOINT_IDS = [1, 2, 3, 4, 5, 6] as const;
 export type ArmJointId = (typeof ARM_JOINT_IDS)[number];
@@ -116,12 +118,58 @@ export const URDF_GRIPPER_LIMITS: Record<'joint_left' | 'joint_right', UrdfLimit
   joint_right: { lower: 0, upper: 0.0715 },
 };
 
+// ===== 机型派生的渲染/校验配置（由后端 /api/models 的 ArmModel 构造；
+// 缺省 = B601 历史常量，测试与降级路径保持可用） =====
+
+export interface ArmConfig {
+  /** 旋转关节电机 ID（不含夹爪） */
+  revoluteIds: readonly number[];
+  /** 夹爪电机 ID；无夹爪为 null */
+  gripperId: number | null;
+  /** id → URDF 关节名与限位 */
+  joints: ReadonlyMap<number, { urdfName: string; limit: UrdfLimit | null }>;
+}
+
+export const DEFAULT_ARM_CONFIG: ArmConfig = {
+  revoluteIds: ARM_JOINT_IDS,
+  gripperId: GRIPPER_ID,
+  joints: new Map(
+    ARM_JOINT_IDS.map((id) => [
+      id,
+      { urdfName: `joint${id}`, limit: URDF_REVOLUTE_LIMITS[`joint${id}`] },
+    ]),
+  ),
+};
+
+/** 从机型配置构造 ArmConfig（前端 3D / 限位校验的唯一真源）。 */
+export function armConfigFromModel(arm: ArmModel | null): ArmConfig {
+  if (!arm) return DEFAULT_ARM_CONFIG;
+  const joints = new Map<number, { urdfName: string; limit: UrdfLimit | null }>();
+  for (const m of arm.motors) {
+    joints.set(m.id, {
+      urdfName: m.urdfName ?? `joint${m.id}`,
+      limit: m.positionLimit
+        ? { lower: m.positionLimit[0], upper: m.positionLimit[1] }
+        : null,
+    });
+  }
+  if (arm.gripper) {
+    joints.set(arm.gripper.id, {
+      urdfName: `joint${arm.gripper.id}`,
+      limit: arm.gripper.positionLimit
+        ? { lower: arm.gripper.positionLimit[0], upper: arm.gripper.positionLimit[1] }
+        : null,
+    });
+  }
+  return { revoluteIds: arm.motorIds, gripperId: arm.gripperId, joints };
+}
+
 // ===== 旋转关节映射 =====
 
 export type LimitStatus = 'ok' | 'out' | 'unknown';
 
 export interface ArmJointMapped {
-  id: ArmJointId;
+  id: number;
   urdfName: string;
   /** 原始电机反馈（rad），null 原样保持 */
   raw: number | null;
@@ -138,11 +186,16 @@ function isFiniteNumber(v: number | null): v is number {
   return v !== null && Number.isFinite(v);
 }
 
-/** 按显式变换 + URDF 限位映射一个旋转关节（ID 1..6）。 */
-export function mapArmJoint(id: ArmJointId, raw: number | null): ArmJointMapped {
-  const t = ARM_JOINT_TRANSFORMS[id];
-  const urdfName = `joint${id}`;
-  const limit = URDF_REVOLUTE_LIMITS[urdfName];
+/** 按显式变换 + 限位映射一个旋转关节；spec 缺省为 B601（joint{id} + URDF 限位）。 */
+export function mapArmJoint(
+  id: number,
+  raw: number | null,
+  spec?: { urdfName: string; limit: UrdfLimit | null },
+): ArmJointMapped {
+  const t = ARM_JOINT_TRANSFORMS[id as ArmJointId] ?? IDENTITY_TRANSFORM;
+  const urdfName = spec?.urdfName ?? `joint${id}`;
+  // spec 存在即权威：limit=null 表示无限制；无 spec 时才回退 B601 URDF 表。
+  const limit = spec !== undefined ? spec.limit : (URDF_REVOLUTE_LIMITS[urdfName] ?? null);
   if (!isFiniteNumber(raw)) {
     return {
       id,
@@ -156,8 +209,10 @@ export function mapArmJoint(id: ArmJointId, raw: number | null): ArmJointMapped 
     };
   }
   const mapped = raw * t.scale * t.direction + t.offset;
-  const out = mapped < limit.lower || mapped > limit.upper;
-  const clamped = Math.min(limit.upper, Math.max(limit.lower, mapped));
+  const out = limit !== null && (mapped < limit.lower || mapped > limit.upper);
+  const clamped = limit !== null
+    ? Math.min(limit.upper, Math.max(limit.lower, mapped))
+    : mapped;
   return {
     id,
     urdfName,
@@ -238,8 +293,8 @@ export interface RobotJointWrite {
 export interface FrameMapResult {
   /** 可直接写入 URDF 关节的数值（旋转关节为限位截断后的映射值） */
   writes: RobotJointWrite[];
-  /** 超出 URDF 限位的电机 ID（需要告警） */
-  outOfLimitIds: ArmJointId[];
+  /** 超出限位的电机 ID（需要告警） */
+  outOfLimitIds: number[];
   /** 夹爪映射结果（未标定 → 无 writes，模型动画暂停） */
   gripper: GripperMapped;
 }
@@ -250,18 +305,19 @@ export interface FrameMapResult {
  */
 export function computeRobotJointWrites(
   joints: ReadonlyArray<{ id: number; position: number | null }>,
+  cfg: ArmConfig = DEFAULT_ARM_CONFIG,
 ): FrameMapResult {
   const writes: RobotJointWrite[] = [];
-  const outOfLimitIds: ArmJointId[] = [];
+  const outOfLimitIds: number[] = [];
   let gripperRaw: number | null = null;
   for (const j of joints) {
-    if ((ARM_JOINT_IDS as readonly number[]).includes(j.id)) {
-      const m = mapArmJoint(j.id as ArmJointId, j.position);
+    if (cfg.revoluteIds.includes(j.id)) {
+      const m = mapArmJoint(j.id, j.position, cfg.joints.get(j.id));
       if (m.clampedForModel !== null) {
         writes.push({ jointName: m.urdfName, value: m.clampedForModel });
       }
       if (m.limitStatus === 'out') outOfLimitIds.push(m.id);
-    } else if (j.id === GRIPPER_ID) {
+    } else if (j.id === cfg.gripperId) {
       gripperRaw = isFiniteNumber(j.position) ? j.position : null;
     }
   }
@@ -271,7 +327,7 @@ export function computeRobotJointWrites(
 // ===== UI 视图（原始值 + 映射值并列，供真机核对） =====
 
 export interface ArmJointView {
-  id: ArmJointId;
+  id: number;
   urdfName: string;
   raw: number | null;
   mapped: number | null;
@@ -279,13 +335,14 @@ export interface ArmJointView {
   zeroVerified: boolean;
 }
 
-/** 从「每关节最新值」列表构建 ID 1..6 的展示视图（顺序固定 1..6）。 */
+/** 从「每关节最新值」列表构建旋转关节的展示视图（顺序固定为配置的 revoluteIds）。 */
 export function armJointViews(
   joints: ReadonlyArray<{ id: number; position: number | null }>,
+  cfg: ArmConfig = DEFAULT_ARM_CONFIG,
 ): ArmJointView[] {
-  return ARM_JOINT_IDS.map((id) => {
+  return cfg.revoluteIds.map((id) => {
     const j = joints.find((x) => x.id === id);
-    const m = mapArmJoint(id, j ? j.position : null);
+    const m = mapArmJoint(id, j ? j.position : null, cfg.joints.get(id));
     return {
       id,
       urdfName: m.urdfName,

@@ -53,6 +53,8 @@ export interface TelemetryClientOptions {
   url: string;
   /** 数据陈旧阈值（ms），默认 1500 */
   staleMs?: number;
+  /** 遥测期望电机 ID（来自激活机型；缺省 B601 1..7） */
+  expectedIds?: readonly number[];
   /** 重连指数退避起点（ms），默认 500 */
   baseBackoffMs?: number;
   /** 重连退避上限（ms），默认 10000 */
@@ -125,11 +127,13 @@ const NULL_JOINT: LiveJoint = {
 };
 
 /**
- * 从一帧遥测构建 ID 1..7 的实时关节值。
- * 缺失关节 / null 字段原样保持 null（绝不伪造或沿用模拟数据）。
+ * 从一帧遥测构建实时关节值（按期望 ID 顺序；缺失原样 null，绝不伪造）。
  */
-export function buildLiveJoints(frame: TelemetryFrame): LiveJoint[] {
-  return TELEMETRY_EXPECTED_IDS.map((id) => {
+export function buildLiveJoints(
+  frame: TelemetryFrame,
+  expectedIds: readonly number[] = TELEMETRY_EXPECTED_IDS,
+): LiveJoint[] {
+  return expectedIds.map((id) => {
     const j = frame.joints.find((x) => x.id === id);
     if (!j) return { ...NULL_JOINT, id };
     return {
@@ -177,9 +181,12 @@ function isNullOrFiniteNumber(v: unknown): boolean {
 /**
  * 严格校验一帧遥测。合法返回原帧，否则返回 null。
  * 校验项：顶层形状 / timestamp / sequence / channel / source / units 精确匹配 /
- * joints 恰为 7 个且 ID 唯一且覆盖 1..7 / 各数值有限性 / freshness 合法。
+ * joints 恰为期望个数且 ID 唯一且完整覆盖期望 ID / 各数值有限性 / freshness 合法。
  */
-export function validateTelemetryFrame(raw: unknown): TelemetryFrame | null {
+export function validateTelemetryFrame(
+  raw: unknown,
+  expectedIds: readonly number[] = TELEMETRY_EXPECTED_IDS,
+): TelemetryFrame | null {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null;
   const f = raw as Record<string, unknown>;
 
@@ -198,16 +205,16 @@ export function validateTelemetryFrame(raw: unknown): TelemetryFrame | null {
   }
   if (Object.keys(u).length !== Object.keys(TELEMETRY_UNITS).length) return null;
 
-  // joints 必须是恰好 7 个、ID 唯一且完整覆盖期望 ID 1..7 的数组。
+  // joints 必须是恰好期望个数、ID 唯一且完整覆盖期望 ID 的数组。
   if (!Array.isArray(f.joints)) return null;
-  if (f.joints.length !== TELEMETRY_EXPECTED_IDS.length) return null;
+  if (f.joints.length !== expectedIds.length) return null;
   const seen = new Set<number>();
   for (const entry of f.joints) {
     if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) return null;
     const j = entry as Record<string, unknown>;
     if (!Number.isInteger(j.id)) return null;
     const id = j.id as number;
-    if (!TELEMETRY_EXPECTED_IDS.includes(id)) return null;
+    if (!expectedIds.includes(id)) return null;
     if (seen.has(id)) return null; // 重复 ID
     seen.add(id);
 
@@ -225,8 +232,8 @@ export function validateTelemetryFrame(raw: unknown): TelemetryFrame | null {
     if (!isNullOrFiniteNumber(j.status_code)) return null;
     if (j.freshness !== 'fresh' && j.freshness !== 'none') return null;
   }
-  // 覆盖校验：7 个唯一且都在期望集内 ⇒ 恰好覆盖 1..7。
-  if (seen.size !== TELEMETRY_EXPECTED_IDS.length) return null;
+  // 覆盖校验：唯一且都在期望集内 ⇒ 恰好覆盖期望 ID。
+  if (seen.size !== expectedIds.length) return null;
 
   return raw as TelemetryFrame;
 }
@@ -247,6 +254,7 @@ export class TelemetryClient {
   private readonly clearIntervalFn: (id: number) => void;
   private readonly webSocketFactory: WebSocketFactory;
   private readonly onChange: ((state: TelemetryClientState) => void) | null;
+  private readonly expectedIds: readonly number[];
 
   private state: TelemetryClientState = initialTelemetryState();
   private ws: WebSocketLike | null = null;
@@ -283,6 +291,7 @@ export class TelemetryClient {
     this.clearIntervalFn = options.clearIntervalFn ?? ((id) => window.clearInterval(id));
     this.webSocketFactory = options.webSocketFactory ?? defaultFactory;
     this.onChange = options.onChange ?? null;
+    this.expectedIds = options.expectedIds ?? TELEMETRY_EXPECTED_IDS;
   }
 
   get snapshot(): TelemetryClientState {
@@ -473,7 +482,7 @@ export class TelemetryClient {
     } catch {
       return; // 非法 JSON：丢弃，不改变任何状态
     }
-    const f = validateTelemetryFrame(parsed);
+    const f = validateTelemetryFrame(parsed, this.expectedIds);
     if (f === null) return; // 校验失败：整帧丢弃，不污染状态
     const now = this.now();
 
@@ -501,7 +510,7 @@ export class TelemetryClient {
     }
     this.lastGapAt = now;
 
-    const joints = buildLiveJoints(f);
+    const joints = buildLiveJoints(f, this.expectedIds);
     const wroteTrend = this.appendTrends(joints, now);
 
     this.patch({

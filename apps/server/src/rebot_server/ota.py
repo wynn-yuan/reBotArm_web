@@ -28,6 +28,8 @@ from urllib.request import Request as UrlRequest, urlopen
 from fastapi import APIRouter, File, Form, Request, UploadFile
 from fastapi.responses import JSONResponse
 
+from . import __version__
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
@@ -94,6 +96,61 @@ def _resolve_base() -> str:
 def _progress_file(base: str) -> str:
     """Return the path to the OTA progress tracking file."""
     return os.path.join(base, "shared", "logs", "ota-progress.json")
+
+
+def _same_build(a: str, b: str) -> bool:
+    """Whether two release-id strings denote the same build.
+
+    deploy.sh stamps releases ``<utc-display>-source`` while GitHub tags are
+    ``v<utc-display>``; the same build must not read as a pending update.
+    """
+
+    def norm(s: str) -> str:
+        s = s.strip()
+        if s[:1] in "vV":
+            s = s[1:]
+        for suffix in ("-source", "Z"):
+            if s.endswith(suffix):
+                s = s[: -len(suffix)]
+        return s
+
+    return bool(a) and bool(b) and norm(a) == norm(b)
+
+
+def _current_release_id() -> str:
+    """Best-effort release id of the running deployment.
+
+    Prefers the A/B release symlink (``REBOTARM_BASE/current -> releases/<id>``),
+    then any ``current`` symlink / ``VERSION`` file found walking up from this
+    module, and finally the package ``__version__`` so a source/dev run still
+    reports something real instead of ``None`` (which made ``has_update``
+    comparisons meaningless).
+    """
+    candidates = []
+    base = _resolve_base()
+    if base not in candidates:
+        candidates.append(base)
+    parent = pathlib.Path(__file__).resolve().parent
+    for _ in range(10):
+        root = str(parent)
+        if root not in candidates:
+            candidates.append(root)
+        parent = parent.parent
+
+    for root in candidates:
+        link = os.path.join(root, "current")
+        if os.path.islink(link):
+            return os.path.basename(os.readlink(link).rstrip("/"))
+        version_file = os.path.join(root, "VERSION")
+        if os.path.isfile(version_file):
+            try:
+                with open(version_file, "r") as f:
+                    value = f.read().strip()
+            except OSError:
+                continue
+            if value and "/" not in value and ".." not in value:
+                return value
+    return str(__version__)
 
 
 #: GitHub repository for OTA updates.
@@ -226,11 +283,8 @@ echo "[OTA] done: $RELEASE_ID"
 @router.get("/api/ota/check")
 def get_ota_check(request: Request) -> dict:
     """Check GitHub for the latest release and compare with current version."""
-    base = _resolve_base()
-    current_id = None
-    current_link = os.path.join(base, "current")
-    if os.path.islink(current_link):
-        current_id = os.path.basename(os.readlink(current_link).rstrip("/"))
+    current_id = _current_release_id()
+    current_known = bool(current_id)
 
     latest = _github_api("releases/latest")
     if latest is None:
@@ -238,15 +292,17 @@ def get_ota_check(request: Request) -> dict:
             "ok": False,
             "error": "no releases found on GitHub",
             "current": current_id,
+            "current_known": current_known,
             "latest": None,
             "has_update": False,
         }
 
     latest_tag = latest.get("tag_name", "")
-    has_update = latest_tag and latest_tag != current_id
+    has_update = bool(latest_tag and current_id and not _same_build(latest_tag, current_id))
     return {
         "ok": True,
         "current": current_id,
+        "current_known": current_known,
         "latest": latest_tag,
         "has_update": has_update,
         "latest_name": latest.get("name", ""),

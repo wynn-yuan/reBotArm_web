@@ -7,12 +7,15 @@ adapter and fakes.
 
 from __future__ import annotations
 
+import json
 import sys
+import tempfile
 import threading
 import time
 import unittest
+from pathlib import Path
 
-from rebot_server.config import Settings
+from rebot_server.config import Settings, load_settings
 from rebot_server.models import EXPECTED_MOTOR_IDS
 
 try:
@@ -305,6 +308,87 @@ class ApiCorsTests(unittest.TestCase):
     def test_foreign_origin_denied_by_default(self):
         response = self._preflight("http://evil.example")
         self.assertNotIn("access-control-allow-origin", response.headers)
+
+
+@unittest.skipUnless(_DEPS_AVAILABLE, "fastapi/httpx not installed")
+class ModelEndpointsTests(unittest.TestCase):
+    def setUp(self):
+        # 走 load_settings 真源解析路径（默认激活 B601），而非裸 Settings()。
+        self.client = TestClient(create_app(settings=load_settings({})))
+
+    def test_models_list_contract(self):
+        response = self.client.get("/api/models")
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["active_arm_id"], "rebot-b601-rs")
+        self.assertGreaterEqual(len(body["models"]), 1)
+        arm = next(a for a in body["models"] if a["arm_id"] == "rebot-b601-rs")
+        self.assertEqual(arm["vendor"], "robstride")
+        self.assertEqual(arm["joint_count"], 6)
+        self.assertEqual(arm["gripper_id"], 7)
+        self.assertEqual(arm["motor_ids"], [1, 2, 3, 4, 5, 6])
+        # 历史常量即注册表数值 —— 扫描/老化/重力输出与改造前逐位相同。
+        self.assertEqual(
+            [m["id"] for m in arm["motors"]], [1, 2, 3, 4, 5, 6]
+        )
+        for required in (
+            "id", "name", "label", "axis", "vendor", "model", "urdf_name",
+            "position_limit", "mit_kp", "mit_kd",
+        ):
+            self.assertIn(required, arm["motors"][0])
+        self.assertIn("left_joint", arm["gripper"])
+
+    def test_active_model_returns_registered_default(self):
+        response = self.client.get("/api/models/active")
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["arm_id"], "rebot-b601-rs")
+        self.assertEqual(body["model"]["motor_ids"], [1, 2, 3, 4, 5, 6])
+        self.assertEqual(body["model"]["gripper_id"], 7)
+
+    def test_switch_requires_disconnected(self):
+        self.client.post("/api/robot/scan")  # connected
+        response = self.client.post(
+            "/api/models/active", json={"arm_id": "rebot-b601-rs"}
+        )
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["error"]["code"], "must_disconnect_first")
+        self.client.post("/api/robot/disconnect")
+        response = self.client.post(
+            "/api/models/active", json={"arm_id": "rebot-b601-rs"}
+        )
+        self.assertEqual(response.status_code, 200)
+
+    def test_switch_unknown_arm_fails_closed(self):
+        response = self.client.post(
+            "/api/models/active", json={"arm_id": "no-such-arm"}
+        )
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["error"]["code"], "unknown_arm")
+
+    def test_switch_persists_state_file_and_replaces_scanner(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_file = str(Path(tmp) / "arm.state.json")
+            client = TestClient(
+                create_app(
+                    settings=load_settings(
+                        {"REBOT_ARM_STATE_FILE": state_file}
+                    )
+                )
+            )
+            response = client.post(
+                "/api/models/active", json={"arm_id": "rebot-b601-rs"}
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["arm_id"], "rebot-b601-rs")
+            self.assertEqual(
+                json.loads(Path(state_file).read_text(encoding="utf-8")),
+                {"arm_id": "rebot-b601-rs"},
+            )
+            # 切换后下一次扫描用新 scanner：期望 ID 仍是 B601 全链。
+            scan = client.post("/api/robot/scan").json()
+            self.assertEqual(scan["expected_ids"], list(EXPECTED_MOTOR_IDS))
+            self.assertEqual(scan["status"], "connected")
 
 
 if __name__ == "__main__":

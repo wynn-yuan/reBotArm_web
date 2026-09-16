@@ -10,7 +10,7 @@ export default defineConfig(({ mode }) => {
   const proxy = resolveDevProxyTargets(loadEnv(mode, __dirname, 'VITE_'));
 
   return {
-    publicDir: resolve(__dirname, '../../packages/robot-description/public'),
+    publicDir: resolve(__dirname, '../../packages/arm-models'),
     plugins: [react()],
     server: {
       port: 5173,

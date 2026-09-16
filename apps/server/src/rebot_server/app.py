@@ -100,31 +100,30 @@ def create_app(
     # available.  Failures are logged but never prevent server startup (fail
     # open for the model — the torque feedforward simply stays 0).
     gravity_model = None
+    arm = getattr(settings, "arm", None)
     if settings.gravity_compensation_enable:
         import os as _os
         import sys as _sys
 
         urdf_path = _os.environ.get("REBOT_URDF_PATH", "")
         if not urdf_path:
-            # 开发环境路径
-            dev_path = _os.path.join(
+            # 开发环境路径（机型文件夹名 = arm_id）
+            dev_root = _os.path.join(
                 _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.dirname(__file__)))),
                 "packages",
-                "robot-description",
-                "public",
+                "arm-models",
                 "robots",
-                "rebot-b601-rs",
-                "model.urdf",
             )
             # 部署环境路径（Jetson: current/web/dist/robots/...）
-            deploy_path = _os.path.join(
+            deploy_root = _os.path.join(
                 _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.dirname(__file__)))),
                 "web",
                 "dist",
                 "robots",
-                "rebot-b601-rs",
-                "model.urdf",
             )
+            arm_id = arm.arm_id if arm is not None else "rebot-b601-rs"
+            dev_path = _os.path.join(dev_root, arm_id, "model.urdf")
+            deploy_path = _os.path.join(deploy_root, arm_id, "model.urdf")
             urdf_path = dev_path if _os.path.isfile(dev_path) else deploy_path
         if not _os.path.isfile(urdf_path):
             import logging as _logging
@@ -138,6 +137,10 @@ def create_app(
                 gravity_model = GravityModel(
                     urdf_path,
                     compensation_factors=settings.gravity_compensation_factor,
+                    revolute_count=(
+                        arm.gravity_revolute_count if arm is not None else 6
+                    ),
+                    root_link=(arm.root_link if arm is not None else "link1"),
                 )
             except Exception as _exc:
                 import logging as _logging
@@ -234,6 +237,8 @@ def create_app(
     )
     app.state.settings = settings
     app.state.service = service
+    app.state.active_arm = settings.arm
+    app.state.active_arm_id = settings.arm_id
     app.state.telemetry_hub = telemetry_hub
     app.state.aging_log_store = aging_log_store
     app.state.aging_recorder = aging_recorder

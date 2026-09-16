@@ -1,0 +1,19 @@
+# reBot DevArm DM 机型配置（Damiao 电机，数值对齐参考工程 reBotArm_control_py/config/rebotarm_dm.yaml）
+# vendor: damiao ｜ dm-serial 桥：每关节独立 feedback_id（0x11..0x16）｜ URDF: reBot-DevArm_fixend
+# 末端为 fixed end_joint（无活动夹爪），故不注册 gripper（gripper: null）。
+arm_id: rebot-devarm-dm
+name: reBot DevArm DM
+vendor: damiao
+host_id: 0
+root_link: link1
+model_scale: 2.5
+model_rotation_x: -1.5707963267948966
+model_position: [0.0, -1.2, 0.0]
+
+motors:
+  - { id: 1, name: J1, label: 基座旋转,   axis: yaw,   vendor: damiao, model: 4340P, feedback_id: 0x11, position_limit: [-2.8, 2.8],  mit: { kp: 120.0, kd: 8.0 } }
+  - { id: 2, name: J2, label: 肩部俯仰,   axis: pitch, vendor: damiao, model: 4340P, feedback_id: 0x12, position_limit: [-3.14, 0.0], mit: { kp: 120.0, kd: 8.0 } }
+  - { id: 3, name: J3, label: 肘部俯仰,   axis: pitch, vendor: damiao, model: 4340P, feedback_id: 0x13, position_limit: [-3.14, 0.0], mit: { kp: 120.0, kd: 8.0 } }
+  - { id: 4, name: J4, label: 腕部1旋转,  axis: roll,  vendor: damiao, model: 4310,  feedback_id: 0x14, position_limit: [-1.87, 1.57], mit: { kp: 18.0,  kd: 2.0 } }
+  - { id: 5, name: J5, label: 腕部2俯仰,  axis: pitch, vendor: damiao, model: 4310,  feedback_id: 0x15, position_limit: [-1.57, 1.57], mit: { kp: 18.0,  kd: 2.0 } }
+  - { id: 6, name: J6, label: 腕部3旋转,  axis: roll,  vendor: damiao, model: 4310,  feedback_id: 0x16, position_limit: [-3.14, 3.14], mit: { kp: 18.0,  kd: 2.0 } }

@@ -24,6 +24,8 @@ dependencies = [
     # 0.4.9 sdist; the only code delta is the CLI motion-run register
     # 0x7017->0x7024 (a parameter write this server never makes).
     "motorbridge==0.5.1",
+    # 机型注册表读取 packages/arm-models/robots/<arm_id>/model.yaml。
+    "PyYAML>=5.4,<7.0",
 ]
 
 [project.optional-dependencies]

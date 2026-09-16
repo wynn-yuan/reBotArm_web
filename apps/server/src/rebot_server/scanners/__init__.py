@@ -32,5 +32,6 @@ def create_scanner(settings: Settings) -> CanScanner:
             allow_active_report=settings.allow_active_report_write,
             mit_kp=settings.mit_kp,
             mit_kd=settings.mit_kd,
+            arm=settings.arm,
         )
     raise ConfigError(f"unsupported adapter {settings.adapter!r} (fail closed)")

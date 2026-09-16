@@ -1,6 +1,6 @@
-import { Activity, LineChart, PlaySquare, Hourglass, ScrollText, SlidersHorizontal } from 'lucide-react';
+import { Activity, Bot, LineChart, PlaySquare, Hourglass, ScrollText, SlidersHorizontal } from 'lucide-react';
 
-export type PageKey = 'monitor' | 'trends' | 'motion' | 'aging' | 'params' | 'logs';
+export type PageKey = 'model' | 'monitor' | 'trends' | 'motion' | 'aging' | 'params' | 'logs';
 
 interface Props {
   active: PageKey;
@@ -12,6 +12,7 @@ const ITEMS: Array<{
   label: string;
   icon: JSX.Element;
 }> = [
+  { key: 'model', label: '机型选择', icon: <Bot size={16} /> },
   { key: 'monitor', label: '实时监控', icon: <Activity size={16} /> },
   { key: 'trends', label: '关节趋势', icon: <LineChart size={16} /> },
   { key: 'motion', label: '动作中心', icon: <PlaySquare size={16} /> },

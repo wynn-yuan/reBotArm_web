@@ -5,8 +5,9 @@ import { useTelemetry } from '../../state/TelemetryContext';
 import { Modal } from '../common/Modal';
 import { StatusBadge } from '../common/StatusBadge';
 import { JOINT_TABLE } from '../../data/simulatedTelemetry';
-import { armJointViews } from '../../telemetry/jointTransform';
-import { formatDateTime, formatDeg, formatNumber } from '../../utils/format';
+import { armConfigFromModel, armJointViews } from '../../telemetry/jointTransform';
+import { formatDateTime, formatDeg, formatIdRange, formatNumber } from '../../utils/format';
+import { armJointCount, armJointIds } from '../../types';
 import type { MitGainChange, MotorId } from '../../types';
 
 // ===== 常量与校验 =====
@@ -51,8 +52,24 @@ export function ParameterPage() {
     stopZeroTorque,
   } = useApp();
   const { joints, comm, stale } = useTelemetry();
+  const activeArm = state.activeArm;
+  // 机型派生：期望电机 ID / 关节数 / 夹爪 ID（缺省 = B601 常量）
+  const expectedIds = useMemo(() => armJointIds(activeArm), [activeArm]);
+  const jointCount = armJointCount(activeArm);
+  const gripperId = activeArm?.gripper?.id ?? (activeArm ? null : 7);
+  // 关节名称/标签查找表：优先激活机型，未激活回退 B601 表
+  const jointDefById = useMemo(() => {
+    const map = new Map<number, { name: string; label: string }>();
+    if (activeArm) {
+      for (const m of activeArm.motors) map.set(m.id, { name: m.name, label: m.label });
+      if (activeArm.gripper) map.set(activeArm.gripper.id, { name: activeArm.gripper.name, label: activeArm.gripper.label });
+    } else {
+      for (const def of JOINT_TABLE) map.set(def.id, { name: def.name, label: def.label });
+    }
+    return map;
+  }, [activeArm]);
   // J1–J6 映射视图（原始 vs 映射后）：恒等变换 + URDF 限位，见 telemetry/jointTransform.ts
-  const telemetryViews = useMemo(() => armJointViews(joints), [joints]);
+  const telemetryViews = useMemo(() => armJointViews(joints, armConfigFromModel(activeArm)), [joints, activeArm]);
   // 遥测显示门禁：已连接且后端具备 telemetry 能力时展示 WebSocket 遥测；
   // simulation 源显式标注"模拟遥测"，motorbridge（或未知源）绝不以模拟遥测冒充真实反馈
   const showTelemetry = state.connection.status === 'connected' && state.connection.capabilities.telemetry;
@@ -159,7 +176,7 @@ export function ParameterPage() {
         continue;
       }
       if (kp !== p.kp || kd !== p.kd) {
-        const def = JOINT_TABLE.find((j) => j.id === p.motorId);
+        const def = jointDefById.get(p.motorId);
         list.push({
           motorId: p.motorId,
           name: def?.name ?? `M${p.motorId}`,
@@ -171,7 +188,7 @@ export function ParameterPage() {
       }
     }
     return { changes: list, invalidCount: invalid };
-  }, [drafts, state.jointParams]);
+  }, [drafts, state.jointParams, jointDefById]);
 
   const setDraft = (id: MotorId, field: 'kp' | 'kd', raw: string) => {
     setDrafts((prev) => {
@@ -186,7 +203,7 @@ export function ParameterPage() {
     setDrafts((prev) => {
       const next = { ...prev };
       for (const p of state.jointParams) {
-        if (p.motorId === 7) continue;
+        if (gripperId !== null && p.motorId === gripperId) continue;
         next[p.motorId] = { kp: String(p.defaultKp), kd: String(p.defaultKd) };
       }
       return next;
@@ -306,14 +323,14 @@ export function ParameterPage() {
             <div className="card-title">
               <PlugZap size={16} /> 机械臂连接
             </div>
-            <div className="card-subtitle">通道 {connection.channel} · 期望电机 ID 1–7 · 状态来自后端 /api/robot/*</div>
+            <div className="card-subtitle">通道 {connection.channel} · 期望电机 ID {formatIdRange(expectedIds)} · 状态来自后端 /api/robot/*</div>
           </div>
           {connected ? (
-            <StatusBadge variant="online">已连接 · {connection.found_ids.length}/7</StatusBadge>
+            <StatusBadge variant="online">已连接 · {connection.found_ids.length}/{expectedIds.length}</StatusBadge>
           ) : scanning ? (
             <StatusBadge variant="busy">扫描中…（等待后端返回）</StatusBadge>
           ) : connection.status === 'partial' ? (
-            <StatusBadge variant="error">部分连接 · {connection.found_ids.length}/7</StatusBadge>
+            <StatusBadge variant="error">部分连接 · {connection.found_ids.length}/{expectedIds.length}</StatusBadge>
           ) : connection.status === 'error' ? (
             <StatusBadge variant="error">连接错误</StatusBadge>
           ) : (
@@ -409,7 +426,7 @@ export function ParameterPage() {
               <div className="param-notice param-notice--danger" role="alert">
                 <AlertTriangle size={16} style={{ flexShrink: 0, marginTop: 2 }} />
                 <span>
-                  缺失电机 ID：{connection.missing_ids.join('、')}。仅当 1–7 全部发现时才视为已连接。
+                  缺失电机 ID：{connection.missing_ids.join('、')}。仅当 {formatIdRange(expectedIds)} 全部发现时才视为已连接。
                   {connection.message ? `（${connection.message}）` : ''}
                 </span>
               </div>
@@ -442,8 +459,8 @@ export function ParameterPage() {
             </div>
             <span className="tertiary" style={{ fontSize: 'var(--font-xs)' }}>
               {connected
-                ? `已连接：${connection.channel} 上 ID 1–7 全部响应（${connection.source ?? '未知'} 适配器）。参数写入与运行模式均以此为门禁。`
-                : connection.message ?? '仅当电机 ID 1–7 全部响应时才视为已连接；连接成功后参数写入与运行模式才可用。'}
+                ? `已连接：${connection.channel} 上 ${formatIdRange(expectedIds)} 全部响应（${connection.source ?? '未知'} 适配器）。参数写入与运行模式均以此为门禁。`
+                : connection.message ?? `仅当电机 ${formatIdRange(expectedIds)} 全部响应时才视为已连接；连接成功后参数写入与运行模式才可用。`}
             </span>
           </div>
         </div>
@@ -508,7 +525,7 @@ export function ParameterPage() {
                 <div className="mono tertiary" style={{ fontSize: 'var(--font-lg)', fontWeight: 600 }}>未接入</div>
               ) : (
                 <div className="mono" style={{ fontSize: 'var(--font-lg)', fontWeight: 600 }}>
-                  {onlineCount} / 7
+                  {onlineCount} / {expectedIds.length}
                 </div>
               )}
               <div className="field-hint">状态码为 0 视为在线</div>
@@ -554,9 +571,9 @@ export function ParameterPage() {
                     </thead>
                     <tbody>
                       {joints.map((j) => {
-                        const def = JOINT_TABLE.find((d) => d.id === j.id);
+                        const def = jointDefById.get(j.id);
                         const view = telemetryViews.find((v) => v.id === j.id);
-                        const isGripper = j.id === 7;
+                        const isGripper = gripperId !== null && j.id === gripperId;
                         return (
                           <tr key={j.id}>
                             <td className="mono">{def?.name ?? `M${j.id}`}</td>
@@ -611,7 +628,7 @@ export function ParameterPage() {
                   </thead>
                   <tbody>
                     {state.jointParams.map((p) => {
-                      const def = JOINT_TABLE.find((j) => j.id === p.motorId);
+                      const def = jointDefById.get(p.motorId);
                       return (
                         <tr key={p.motorId}>
                           <td className="mono">{def?.name ?? `M${p.motorId}`}</td>
@@ -685,7 +702,7 @@ export function ParameterPage() {
                     </thead>
                     <tbody>
                       {state.jointParams.map((p) => {
-                        const def = JOINT_TABLE.find((j) => j.id === p.motorId);
+                        const def = jointDefById.get(p.motorId);
                         const d = drafts[p.motorId];
                         const kpV = parseGain(d.kp, KP_MIN, KP_MAX);
                         const kdV = parseGain(d.kd, KD_MIN, KD_MAX);
@@ -777,7 +794,7 @@ export function ParameterPage() {
                   <button className="btn" onClick={fillArmDefaults} title="把 J1–J6 输入填为 RS 默认值，不覆盖夹爪；仅修改输入框">
                     批量填充臂关节（J1–J6）
                   </button>
-                  <button className="btn" onClick={fillAllDefaults} title="把全部 7 个关节输入填为 RS 默认值；仅修改输入框">
+                  <button className="btn" onClick={fillAllDefaults} title={`把全部 ${jointCount} 个关节输入填为 RS 默认值；仅修改输入框`}>
                     恢复 RS 默认值
                   </button>
                   <button className="btn btn--ghost" onClick={resetDraftsToApplied} title="丢弃草稿，恢复为当前已应用值">
@@ -849,14 +866,14 @@ export function ParameterPage() {
                 <div className="card-title">
                   <Crosshair size={16} /> 整机机械零位
                 </div>
-                <div className="card-subtitle">危险操作 · 改变 7 个电机的位置参考 · 仅整机，不提供单关节零位</div>
+                <div className="card-subtitle">危险操作 · 改变 {jointCount} 个电机的位置参考 · 仅整机，不提供单关节零位</div>
               </div>
               <StatusBadge variant={canSetZero ? 'online' : 'busy'}>{canSetZero ? '可进入' : '受限'}</StatusBadge>
             </div>
             <div className="card-body">
               <div className="stack stack--lg">
                 <ul className="stack stack--sm" style={{ paddingLeft: 'var(--space-4)', listStyle: 'disc', color: 'var(--text-secondary)', fontSize: 'var(--font-sm)', lineHeight: 'var(--leading-normal)' }}>
-                  <li>会改变全部 7 个电机的位置参考（整机 set_zero_position），请确保机械臂已人工摆放到机械零位。</li>
+                  <li>会改变全部 {jointCount} 个电机的位置参考（整机 set_zero_position），请确保机械臂已人工摆放到机械零位。</li>
                   <li>参考流程逐电机执行 disable → 读取 0x7019 → set_zero_position → store_parameters。</li>
                   <li>仅在空闲、无急停、无安全保持且遥测新鲜时可进入设置流程。</li>
                   <li>这是持久化写入；确认前请托住机械臂并准备硬件断电，失败时按现场流程处置。</li>
@@ -964,10 +981,10 @@ export function ParameterPage() {
         }
       >
         <div className="section-title" style={{ marginBottom: 'var(--space-2)' }}>
-          7 关节当前位置
+          {jointCount} 关节当前位置
         </div>
         <div className="table-scroll" style={{ marginBottom: 'var(--space-3)' }}>
-          <table className="motor-table" aria-label="7 关节当前位置表">
+          <table className="motor-table" aria-label="{jointCount} 关节当前位置表">
             <thead>
               <tr>
                 <th style={{ width: 90 }}>关节</th>
@@ -977,7 +994,7 @@ export function ParameterPage() {
             </thead>
             <tbody>
               {joints.map((j) => {
-                const def = JOINT_TABLE.find((d) => d.id === j.id);
+                const def = jointDefById.get(j.id);
                 return (
                   <tr key={j.id}>
                     <td className="mono">{def?.name ?? `M${j.id}`}</td>
@@ -985,7 +1002,7 @@ export function ParameterPage() {
                     <td className="mono" style={{ textAlign: 'right' }}>
                       {j.position === null
                         ? '—'
-                        : j.id === 7
+                        : gripperId !== null && j.id === gripperId
                           ? `${formatNumber(j.position, 3)} rad（夹爪待标定）`
                           : formatDeg(j.position, 1)}
                     </td>

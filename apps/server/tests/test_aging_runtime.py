@@ -100,7 +100,7 @@ class FakeService:
     def begin_aging_motion(self):
         self.begun += 1
 
-    def send_aging_positions(self, positions, velocity_limits):
+    def send_aging_positions(self, positions, velocity_limits, gravity_torque=None):
         self.sent.append((list(positions), list(velocity_limits)))
 
     def finish_aging_motion(self, *, disable):
@@ -146,6 +146,15 @@ class AgingRuntimeTests(unittest.TestCase):
         self.assertEqual(recorder.started["kind"], "aging_cycle")
         self.assertEqual(recorder.processed["id"], "processed-1")
         self.assertEqual(recorder.state, "inactive")
+
+        # 会话起止时间：终态 stopped 事件必须带校正后的墙钟起止时间，status 也有 ended_at。
+        terminal = recorder.events[-1]
+        self.assertEqual(terminal["type"], "stopped")
+        self.assertEqual(terminal["status"], "completed")
+        self.assertRegex(terminal["at"], r"^\d{4}-\d{2}-\d{2}T")
+        self.assertEqual(terminal["started_at"], started["started_at"])
+        self.assertEqual(terminal["ended_at"], ended["ended_at"])
+        self.assertIsNotNone(ended["ended_at"])
 
     def test_simulation_frames_cannot_start_real_aging(self):
         runtime = AgingRuntime(settings(), FakeService(), FakeRecorder())

@@ -59,6 +59,7 @@ import logging
 import time
 from typing import Any, Dict, Optional, Sequence, Tuple
 
+from ..arm_registry import ArmModel
 from ..config import (
     DEFAULT_HOST_ID,
     DEFAULT_MIT_KD,
@@ -74,9 +75,17 @@ from .base import CanScanner
 
 logger = logging.getLogger(__name__)
 
-#: Motor models per the RS hardware reference (rebotarm_rs.yaml): J1–J3 are
-#: rs-06, J4–J6 and the gripper are rs-00.
-MOTOR_MODELS: Dict[int, str] = {
+#: 每厂商的注册方法名（与 motorbridge 0.5.1 SDK ``add_<vendor>_motor`` 对应）。
+ADD_MOTOR_BY_VENDOR: Dict[str, str] = {
+    "robstride": "add_robstride_motor",
+    "damiao": "add_damiao_motor",
+    "myactuator": "add_myactuator_motor",
+    "hightorque": "add_hightorque_motor",
+}
+
+#: 未传 ``arm`` 时的历史 B601 电机型号回落（生产代码一律传 arm=settings.arm；
+#: 测试大量用无 arm 构造，靠这个保持行为不变）。
+_LEGACY_MODELS: Dict[int, str] = {
     1: "rs-06",
     2: "rs-06",
     3: "rs-06",
@@ -85,6 +94,27 @@ MOTOR_MODELS: Dict[int, str] = {
     6: "rs-00",
     7: "rs-00",
 }
+
+
+def resolve_motor_model(arm: Optional[ArmModel], motor_id: int, host_id: int) -> Tuple[str, str, int]:
+    """Return ``(vendor, model, feedback_id)`` for *motor_id*.
+
+    配置机型优先；``arm is None`` 时回落历史 B601 常量。未知 id 抛错
+    （fail closed，按 ID 隔离）。scanner 与激活上报第二次注册共用。
+    """
+    if arm is not None:
+        spec = arm.spec_for(motor_id)
+        if spec is None:
+            raise ValueError(f"no motor model configured for id {motor_id}")
+        return (
+            spec.vendor,
+            spec.model,
+            getattr(spec, "feedback_id", None) or host_id,
+        )
+    model = _LEGACY_MODELS.get(motor_id)
+    if model is None:
+        raise ValueError(f"no motor model configured for id {motor_id}")
+    return "robstride", model, host_id
 
 #: The single explicitly authorized motor write (Phase 5 user authorization,
 #: narrow scope). Callable ONLY from the active-report telemetry session in
@@ -314,12 +344,16 @@ class MotorbridgeCanScanner(CanScanner):
         allow_active_report: bool = False,
         mit_kp: Sequence[float] = DEFAULT_MIT_KP,
         mit_kd: Sequence[float] = DEFAULT_MIT_KD,
+        arm: Optional[ArmModel] = None,
     ) -> None:
         self._host_id = host_id
         self._ping_timeout_ms = max(
             MIN_PING_TIMEOUT_MS, min(MAX_PING_TIMEOUT_MS, int(ping_timeout_ms))
         )
         self._module_name = module_name
+        self._arm = arm
+        # 完整链路（转动关节 + 夹爪）；无 arm 时回落历史 B601 常量。
+        self._motor_ids = sorted(arm.joint_ids) if arm is not None else sorted(_LEGACY_MODELS)
         # Production uses one controller for scan, active-report receive and
         # manual enable/disable.  The default remains non-persistent for the
         # narrow unit-test scan seam.
@@ -329,9 +363,29 @@ class MotorbridgeCanScanner(CanScanner):
         self._motors: Dict[int, Any] = {}
         self._active_report_ids: list[int] = []
         # MIT position-servo gains per motor id (J1..J6 + gripper). Used by
-        # aging motion; validated to seven positive finite values at config load.
+        # aging motion; validated to N positive finite values at config load.
         self._mit_kp = [float(value) for value in mit_kp]
         self._mit_kd = [float(value) for value in mit_kd]
+
+    def _model_for(self, motor_id: int) -> Tuple[str, str, int]:
+        """Return ``(vendor, model, feedback_id)`` for *motor_id*.
+
+        配置机型优先；无 arm 时用历史 B601 常量。未知 id 保持原有错误文案
+        （fail closed，按 ID 隔离）。
+        """
+        return resolve_motor_model(self._arm, motor_id, self._host_id)
+
+    def _assert_all_robstride(self) -> None:
+        """持久增益 / 机械零点是 robstride 专属 SDK 路径，其它厂商报错。"""
+        if self._arm is None:
+            return
+        for motor_id in self._motor_ids:
+            spec = self._arm.spec_for(motor_id)
+            if spec is not None and spec.vendor != "robstride":
+                raise RuntimeError(
+                    f"motor {motor_id}: {spec.vendor} motors do not support "
+                    "persistent gains / mechanical zero (robstride only)"
+                )
 
     def scan(self, channel: str, expected_ids: Sequence[int]) -> ScanOutcome:
         try:
@@ -388,14 +442,17 @@ class MotorbridgeCanScanner(CanScanner):
                 for motor_id in sorted(set(expected_ids)):  # strictly serial
                     motor: Any = None
                     try:
-                        model = MOTOR_MODELS.get(motor_id)
-                        if model is None:
-                            raise ValueError(
-                                f"no motor model configured for id {motor_id}"
-                            )
-                        motor = controller.add_robstride_motor(
-                            motor_id, self._host_id, model
+                        # 按激活机型的厂商分发 add_<vendor>_motor；无 arm 回落历史 B601。
+                        vendor, model, feedback_id = self._model_for(motor_id)
+                        add_motor = getattr(
+                            controller, ADD_MOTOR_BY_VENDOR.get(vendor), None
                         )
+                        if add_motor is None:
+                            raise ValueError(
+                                f"vendor {vendor!r} has no {vendor} motor "
+                                "registration method in the SDK"
+                            )
+                        motor = add_motor(motor_id, feedback_id, model)
                         if self._persist:
                             motors_by_id[motor_id] = motor
                         bound = True
@@ -529,14 +586,14 @@ class MotorbridgeCanScanner(CanScanner):
         success. Without that confirmation the motor may stay in its previous
         mode and the MIT servo never engages (joints stay soft).
         """
-        if self._controller is None or set(self._motors) != set(MOTOR_MODELS):
+        if self._controller is None or set(self._motors) != set(self._motor_ids):
             raise RuntimeError("controller is not connected to all motors")
         module = importlib.import_module(self._module_name)
         mode = getattr(module, "Mode", None)
         mit = getattr(mode, "MIT", None) if mode is not None else None
         if mit is None:
             raise RuntimeError("motorbridge SDK lacks Mode.MIT")
-        for motor_id in sorted(MOTOR_MODELS):
+        for motor_id in sorted(self._motor_ids):
             motor = self._motors[motor_id]
             call = getattr(motor, "ensure_mode", None)
             if not callable(call):
@@ -559,9 +616,9 @@ class MotorbridgeCanScanner(CanScanner):
 
     def send_zero_torque(self) -> None:
         """Send the exact reference-script all-zero MIT frame to all IDs."""
-        if self._controller is None or set(self._motors) != set(MOTOR_MODELS):
+        if self._controller is None or set(self._motors) != set(self._motor_ids):
             raise RuntimeError("controller is not connected to all motors")
-        for motor_id in sorted(MOTOR_MODELS):
+        for motor_id in sorted(self._motor_ids):
             motor = self._motors[motor_id]
             call = getattr(motor, "send_mit", None)
             if not callable(call):
@@ -570,14 +627,14 @@ class MotorbridgeCanScanner(CanScanner):
 
     def ensure_pos_vel_mode(self) -> None:
         """Switch all seven connected motors to RobStride POS_VEL mode."""
-        if self._controller is None or set(self._motors) != set(MOTOR_MODELS):
+        if self._controller is None or set(self._motors) != set(self._motor_ids):
             raise RuntimeError("controller is not connected to all motors")
         module = importlib.import_module(self._module_name)
         mode = getattr(module, "Mode", None)
         pos_vel = getattr(mode, "POS_VEL", None) if mode is not None else None
         if pos_vel is None:
             raise RuntimeError("motorbridge SDK lacks Mode.POS_VEL")
-        for motor_id in sorted(MOTOR_MODELS):
+        for motor_id in sorted(self._motor_ids):
             call = getattr(self._motors[motor_id], "ensure_mode", None)
             if not callable(call):
                 raise RuntimeError("motorbridge SDK lacks Motor.ensure_mode")
@@ -597,11 +654,13 @@ class MotorbridgeCanScanner(CanScanner):
         the bus lock again, eliminating the 100 Hz lock contention that causes
         stutter.
         """
-        if self._controller is None or set(self._motors) != set(MOTOR_MODELS):
+        if self._controller is None or set(self._motors) != set(self._motor_ids):
             raise RuntimeError("controller is not connected to all motors")
-        if len(positions) != len(MOTOR_MODELS):
-            raise ValueError("aging command requires exactly seven positions")
-        for index, motor_id in enumerate(sorted(MOTOR_MODELS)):
+        if len(positions) != len(self._motor_ids):
+            raise ValueError(
+                f"aging command requires exactly {len(self._motor_ids)} positions"
+            )
+        for index, motor_id in enumerate(sorted(self._motor_ids)):
             motor = self._motors[motor_id]
             call = getattr(motor, "send_mit", None)
             if not callable(call):
@@ -633,8 +692,9 @@ class MotorbridgeCanScanner(CanScanner):
         position-loop KP (0x701E) and speed-loop KP (0x701F). They are not
         MIT-frame gains and are never sent through send_mit.
         """
-        if self._controller is None or set(self._motors) != set(MOTOR_MODELS):
+        if self._controller is None or set(self._motors) != set(self._motor_ids):
             raise RuntimeError("controller is not connected to all motors")
+        self._assert_all_robstride()
         snapshots: list[tuple[Any, int, float]] = []
         written: list[tuple[Any, int, float]] = []
         for change in changes:
@@ -692,16 +752,17 @@ class MotorbridgeCanScanner(CanScanner):
         ``disable`` → read ``0x7019`` → ``set_zero_position`` →
         ``store_parameters`` for each connected motor, in fixed ID order.
         """
-        if self._controller is None or set(self._motors) != set(MOTOR_MODELS):
+        if self._controller is None or set(self._motors) != set(self._motor_ids):
             raise RuntimeError("controller is not connected to all motors")
-        for motor_id in sorted(MOTOR_MODELS):
+        self._assert_all_robstride()
+        for motor_id in sorted(self._motor_ids):
             motor = self._motors[motor_id]
             for name in ("disable", "set_zero_position", "robstride_get_param_f32", "store_parameters"):
                 if not callable(getattr(motor, name, None)):
                     raise RuntimeError(f"motorbridge SDK lacks Motor.{name}")
 
         previous_positions: Dict[int, float | None] = {}
-        for motor_id in sorted(MOTOR_MODELS):
+        for motor_id in sorted(self._motor_ids):
             try:
                 previous_positions[motor_id] = float(
                     self._motors[motor_id].robstride_get_param_f32(0x7019, 200)
@@ -712,7 +773,7 @@ class MotorbridgeCanScanner(CanScanner):
                 previous_positions[motor_id] = None
 
         completed: list[int] = []
-        for motor_id in sorted(MOTOR_MODELS):
+        for motor_id in sorted(self._motor_ids):
             motor = self._motors[motor_id]
             motor.disable()
             motor.set_zero_position()

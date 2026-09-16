@@ -9,7 +9,8 @@ import { StatusBadge } from '../common/StatusBadge';
 import { formatClock, formatDuration } from '../../utils/format';
 import { retimeTrajectory, type TrajectoryRetimeResult } from '../../motion/trajectoryRetime';
 import { URDF_REVOLUTE_LIMITS } from '../../telemetry/jointTransform';
-import type { ControlMode, LiveJoint, RecordedAction, RecordConfig } from '../../types';
+import { armJointCount, armJointIds } from '../../types';
+import type { ArmModel, ControlMode, LiveJoint, RecordedAction, RecordConfig } from '../../types';
 
 export const RECORDING_FREQUENCY = 100;
 /** 连续抗抖滤波窗口；100 Hz 下 13 帧约等于 130 ms。 */
@@ -25,6 +26,40 @@ export const ACTION_JOINT_LIMITS = [
   { lower: 0, upper: 3 },
 ] as const;
 
+const DEFAULT_JOINT_IDS: readonly number[] = [1, 2, 3, 4, 5, 6, 7];
+
+export interface JointDef {
+  label: string;
+  lower: number;
+  upper: number;
+}
+
+/** B601 缺省「标签 + 限位」（未激活机型 / 测试时使用）。 */
+const B601_JOINT_DEFS: JointDef[] = JOINT_LABELS.map((label, joint) => ({
+  label,
+  lower: ACTION_JOINT_LIMITS[joint].lower,
+  upper: ACTION_JOINT_LIMITS[joint].upper,
+}));
+
+/**
+ * 从激活机型派生关节「标签 + 限位」列表（顺序 = 全部关节 ID，含夹爪；
+ * 限位缺失时为无限制）。缺省 B601 历史常量。
+ */
+export function armJointDefs(arm: ArmModel | null): JointDef[] {
+  if (!arm) return B601_JOINT_DEFS;
+  return armJointIds(arm).map((id) => {
+    const motor = arm.motors.find((m) => m.id === id);
+    const gripper = arm.gripper?.id === id ? arm.gripper : null;
+    const source = motor ?? gripper ?? null;
+    const limit = source?.positionLimit ?? null;
+    return {
+      label: source ? `${source.name} ${source.label}` : `J${id}`,
+      lower: limit ? limit[0] : -Infinity,
+      upper: limit ? limit[1] : Infinity,
+    };
+  });
+}
+
 export interface RecordGateInput {
   connected: boolean;
   emergency: boolean;
@@ -33,6 +68,8 @@ export interface RecordGateInput {
   actionName: string;
   positions: readonly number[] | null;
   operatorConfirmed: boolean;
+  /** 期望关节数（来自激活机型；缺省 B601 的 7） */
+  jointCount?: number;
 }
 
 /** Pure UI gate: recording is local-only but still requires the live safety conditions. */
@@ -44,16 +81,18 @@ export function canStartOfflineRecording(input: RecordGateInput): boolean {
     && input.mode === 'idle'
     && input.actionName.trim().length > 0
     && input.positions !== null
-    && input.positions.length === 7
+    && input.positions.length === (input.jointCount ?? DEFAULT_JOINT_IDS.length)
     && input.positions.every(Number.isFinite)
     && input.operatorConfirmed;
 }
 
 /** Convert the latest live telemetry into joint-major raw samples. Never synthesizes values. */
-export function collectTelemetryPositions(joints: readonly LiveJoint[]): number[] | null {
-  if (joints.length !== 7) return null;
+export function collectTelemetryPositions(
+  joints: readonly LiveJoint[],
+  jointIds: readonly number[] = DEFAULT_JOINT_IDS,
+): number[] | null {
   const byId = new Map(joints.map((joint) => [joint.id, joint.position]));
-  const positions = Array.from({ length: 7 }, (_, index) => byId.get(index + 1) ?? null);
+  const positions = jointIds.map((id) => byId.get(id) ?? null);
   return positions.every((position): position is number => position !== null && Number.isFinite(position))
     ? positions
     : null;
@@ -68,18 +107,21 @@ export interface JointLimitDiagnostic {
   inLimit: boolean;
 }
 
-export function diagnoseJointLimits(trails: readonly (readonly number[])[]): JointLimitDiagnostic[] {
-  return ACTION_JOINT_LIMITS.map((limit, joint) => {
+export function diagnoseJointLimits(
+  trails: readonly (readonly number[])[],
+  defs: readonly JointDef[] = B601_JOINT_DEFS,
+): JointLimitDiagnostic[] {
+  return defs.map((def, joint) => {
     const values = trails[joint] ?? [];
     const min = values.length > 0 ? Math.min(...values) : null;
     const max = values.length > 0 ? Math.max(...values) : null;
     return {
-      joint: JOINT_LABELS[joint],
-      lower: limit.lower,
-      upper: limit.upper,
+      joint: def.label,
+      lower: def.lower,
+      upper: def.upper,
       min,
       max,
-      inLimit: min !== null && max !== null && min >= limit.lower && max <= limit.upper,
+      inLimit: min !== null && max !== null && min >= def.lower && max <= def.upper,
     };
   });
 }
@@ -97,7 +139,7 @@ export function createProcessedAction(
     durationMs: result.duration * 1000,
     sampleCount: result.sampleCount,
     samplingHz: result.diagnostics.outputFrequency,
-    jointCount: 7,
+    jointCount: raw.jointCount,
     trails: result.trails.map((trail) => [...trail]),
     version: 'processed',
     rawActionId: raw.id,
@@ -105,8 +147,8 @@ export function createProcessedAction(
   };
 }
 
-function makeDefaultVelocities(): number[] {
-  return [1, 1, 1, 1, 1, 1, 1];
+function makeDefaultVelocities(count: number): number[] {
+  return Array.from({ length: count }, () => 1);
 }
 
 export function MotionCenterPage() {
@@ -123,12 +165,17 @@ export function MotionCenterPage() {
     stopZeroTorque,
   } = useApp();
   const { joints, stale } = useTelemetry();
+  // 已激活机型的关节定义（标签 + 限位；未激活 fallback B601）
+  const activeArm = state.activeArm;
+  const jointCount = armJointCount(activeArm);
+  const jointIds = useMemo(() => armJointIds(activeArm), [activeArm]);
+  const jointDefs = useMemo(() => armJointDefs(activeArm), [activeArm]);
   const [actionName, setActionName] = useState('');
   const [countdownSec, setCountdownSec] = useState(3);
   const [countdownLeft, setCountdownLeft] = useState(0);
   const [selectedRawId, setSelectedRawId] = useState<string | null>(null);
   const [selectedPreviewId, setSelectedPreviewId] = useState<string | null>(null);
-  const [velocities, setVelocities] = useState(makeDefaultVelocities);
+  const [velocities, setVelocities] = useState(() => makeDefaultVelocities(jointCount));
   const [targetProgressSpeed, setTargetProgressSpeed] = useState(0.8);
   const [maxAcceleration, setMaxAcceleration] = useState(1.5);
   const [overallSpeed, setOverallSpeed] = useState(1);
@@ -141,12 +188,17 @@ export function MotionCenterPage() {
   const [previewPlaying, setPreviewPlaying] = useState(false);
   const [previewSpeed, setPreviewSpeed] = useState(1);
 
-  const livePositions = useMemo(() => collectTelemetryPositions(joints), [joints]);
+  const livePositions = useMemo(() => collectTelemetryPositions(joints, jointIds), [joints, jointIds]);
   const freshPositions = stale ? null : livePositions;
   const livePositionsRef = useRef<number[] | null>(freshPositions);
   useEffect(() => {
     livePositionsRef.current = freshPositions;
   }, [freshPositions]);
+
+  // 切换机型后重建速度上限输入个数
+  useEffect(() => {
+    setVelocities(makeDefaultVelocities(jointCount));
+  }, [jointCount]);
 
   const connected = state.connection.status === 'connected';
   const emergency = state.emergencyStop;
@@ -161,6 +213,7 @@ export function MotionCenterPage() {
     actionName,
     positions: freshPositions,
     operatorConfirmed: true,
+    jointCount,
   });
 
   const rawActions = useMemo(
@@ -265,14 +318,14 @@ export function MotionCenterPage() {
         maxProgressSpeed: targetProgressSpeed,
         maxAcceleration,
         outputFrequency: RECORDING_FREQUENCY,
-        jointLimits: ACTION_JOINT_LIMITS,
+        jointLimits: jointDefs.map((def) => ({ lower: def.lower, upper: def.upper })),
         overallSpeedScale: overallSpeed,
         smoothingWindow,
         keypointEpsilon: smoothingWindow <= 7 ? 0.04 : smoothingWindow <= 13 ? 0.08 : 0.15,
         maxKeypoints: 48,
         preserveRecordedTiming: preserveTiming,
         returnHome,
-        homePosition: [0, 0, 0, 0, 0, 0, 0],
+        homePosition: jointDefs.map(() => 0),
       });
       setRetimeError(null);
       setRetimeResult(result);
@@ -280,7 +333,7 @@ export function MotionCenterPage() {
       setRetimeResult(null);
       setRetimeError(error instanceof Error ? error.message : String(error));
     }
-  }, [maxAcceleration, preserveTiming, returnHome, selectedRaw, smoothingWindow, targetProgressSpeed, velocities, overallSpeed]);
+  }, [jointDefs, maxAcceleration, preserveTiming, returnHome, selectedRaw, smoothingWindow, targetProgressSpeed, velocities, overallSpeed]);
 
   const handleSaveProcessed = () => {
     if (!selectedRaw || !retimeResult) return;
@@ -293,7 +346,7 @@ export function MotionCenterPage() {
     setSelectedPreviewId(action.id);
   };
 
-  const limitDiagnostics = retimeResult ? diagnoseJointLimits(retimeResult.trails) : selectedRaw ? diagnoseJointLimits(selectedRaw.trails) : [];
+  const limitDiagnostics = retimeResult ? diagnoseJointLimits(retimeResult.trails, jointDefs) : selectedRaw ? diagnoseJointLimits(selectedRaw.trails, jointDefs) : [];
   const recordingDuration = recording ? Math.max(0, Date.now() - recording.startedAt) : 0;
 
   return (
@@ -339,7 +392,7 @@ export function MotionCenterPage() {
             <div className="card-body stack">
               <div className="field"><label className="field-label" htmlFor="raw-action">原始动作</label><select id="raw-action" className="select" value={selectedRaw?.id ?? ''} onChange={(event) => { setSelectedRawId(event.target.value); setRetimeResult(null); setRetimeError(null); }}><option value="">请选择 raw 动作</option>{rawActions.map((action) => <option key={action.id} value={action.id}>{action.name} · {action.sampleCount} 帧</option>)}</select></div>
               <div className="motion-center__joint-grid">
-                {JOINT_LABELS.map((label, joint) => <div className="field" key={label}><label className="field-label" htmlFor={`velocity-${joint}`}>{label} 速度上限</label><div className="motion-center__number-input"><input id={`velocity-${joint}`} className="input" type="number" min="0.01" step="0.01" value={velocities[joint]} onChange={(event) => setVelocities((current) => current.map((value, index) => index === joint ? Number(event.target.value) : value))} /><span>rad/s</span></div></div>)}
+                {jointDefs.map((def, joint) => <div className="field" key={def.label}><label className="field-label" htmlFor={`velocity-${joint}`}>{def.label} 速度上限</label><div className="motion-center__number-input"><input id={`velocity-${joint}`} className="input" type="number" min="0.01" step="0.01" value={velocities[joint]} onChange={(event) => setVelocities((current) => current.map((value, index) => index === joint ? Number(event.target.value) : value))} /><span>rad/s</span></div></div>)}
               </div>
               <div className="motion-center__form-grid">
                 <div className="field"><label className="field-label" htmlFor="progress-speed">整体目标进度速度</label><div className="motion-center__number-input"><input id="progress-speed" className="input" type="number" min="0.01" step="0.05" value={targetProgressSpeed} onChange={(event) => setTargetProgressSpeed(Number(event.target.value))} /><span>1/s</span></div></div>
@@ -359,7 +412,7 @@ export function MotionCenterPage() {
               <div className="kv"><span className="kv__k">输出频率</span><span className="kv__v mono">{RECORDING_FREQUENCY} Hz（固定）</span></div>
               <button className="btn btn--primary" disabled={!selectedRaw} onClick={handleProcess}><Play size={14} /> 计算轨迹处理</button>
               {retimeError && <div className="motion-center__error" role="alert">{retimeError}</div>}
-              {retimeResult && <RetimeSummary raw={selectedRaw} result={retimeResult} limits={limitDiagnostics} onSave={handleSaveProcessed} />}
+              {retimeResult && <RetimeSummary raw={selectedRaw} result={retimeResult} limits={limitDiagnostics} labels={jointDefs.map((def) => def.label)} onSave={handleSaveProcessed} />}
             </div>
           </section>
         </div>
@@ -372,7 +425,7 @@ export function MotionCenterPage() {
               storageKey="rebotarm:motion-center-preview-height"
               className="resizable-panel"
             >
-              <ArmScene height="100%" view="perspective" overridePositions={previewPositions} />
+              <ArmScene height="100%" view="perspective" overridePositions={previewPositions} frameloop="demand" />
             </ResizablePanel>
           </div>
           <div className="motion-center__preview-controls">
@@ -392,7 +445,7 @@ export function MotionCenterPage() {
   );
 }
 
-function RetimeSummary({ raw, result, limits, onSave }: { raw: RecordedAction | null; result: TrajectoryRetimeResult; limits: JointLimitDiagnostic[]; onSave: () => void }) {
+function RetimeSummary({ raw, result, limits, labels, onSave }: { raw: RecordedAction | null; result: TrajectoryRetimeResult; limits: JointLimitDiagnostic[]; labels: string[]; onSave: () => void }) {
   const warnings = result.diagnostics.warnings;
   const peakVelocities = result.peakVelocities;
   const originalDuration = (raw?.durationMs ?? 0) / 1000;
@@ -404,5 +457,5 @@ function RetimeSummary({ raw, result, limits, onSave }: { raw: RecordedAction | 
     {(result.diagnostics.smoothingWindowSamples ?? 0) > 0 && <span>抗抖窗口 <b>{result.diagnostics.smoothingWindowSamples} 帧</b></span>}
     {(result.diagnostics.smoothingWindowSamples ?? 0) > 0 && <span>形状控制点 <b>{result.diagnostics.retainedPathPoints}</b></span>}
     {(result.diagnostics.addedHomePoints ?? 0) > 0 && <span>回零段 <b>{result.diagnostics.addedHomePoints}</b></span>}
-  </div><div className="motion-center__peaks"><b>各关节峰值速度</b>{peakVelocities.map((peak, joint) => <span key={JOINT_LABELS[joint]}>{JOINT_LABELS[joint]} <em>{peak.toFixed(3)} rad/s</em></span>)}</div><div className="motion-center__limits"><b>限位诊断</b>{limits.map((diagnostic) => <span key={diagnostic.joint} className={diagnostic.inLimit ? 'motion-center__limit-ok' : 'motion-center__limit-bad'}>{diagnostic.joint}: {diagnostic.inLimit ? '通过' : '超限'} ({diagnostic.min?.toFixed(3) ?? '—'} … {diagnostic.max?.toFixed(3) ?? '—'})</span>)}</div>{warnings.length > 0 && <div className="field-hint">提示：{warnings.join('；')}</div>}</div>;
+  </div><div className="motion-center__peaks"><b>各关节峰值速度</b>{peakVelocities.map((peak, joint) => <span key={labels[joint]}>{labels[joint]} <em>{peak.toFixed(3)} rad/s</em></span>)}</div><div className="motion-center__limits"><b>限位诊断</b>{limits.map((diagnostic) => <span key={diagnostic.joint} className={diagnostic.inLimit ? 'motion-center__limit-ok' : 'motion-center__limit-bad'}>{diagnostic.joint}: {diagnostic.inLimit ? '通过' : '超限'} ({diagnostic.min?.toFixed(3) ?? '—'} … {diagnostic.max?.toFixed(3) ?? '—'})</span>)}</div>{warnings.length > 0 && <div className="field-hint">提示：{warnings.join('；')}</div>}</div>;
 }

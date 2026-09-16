@@ -12,6 +12,7 @@ import {
   startAgingRecording,
   createAgingLogDirectory,
   getHealth,
+  getModels,
   postScan,
   postDisconnect,
   normalizeConnection,
@@ -448,5 +449,70 @@ describe('连接响应携带 capabilities（Phase 7H：HDMI 页面遥测门禁�
     expect(conn.status).toBe(OK_CONNECTION.status);
     expect(conn.found_ids).toEqual(OK_CONNECTION.found_ids);
     expect(conn.capabilities).toEqual(MOTORBRIDGE_CAPS);
+  });
+});
+
+describe('机型注册表 API（snake_case → camelCase 转换）', () => {
+  // 真实 GET /api/models 返回形状（B601）
+  const RAW_MODELS = {
+    models: [
+      {
+        arm_id: 'rebot-b601-rs',
+        name: 'Rebot RS B601',
+        vendor: 'robstride',
+        host_id: 253,
+        joint_count: 6,
+        motor_ids: [1, 2, 3, 4, 5, 6],
+        gripper_id: 7,
+        model_scale: 2.5,
+        model_rotation_x: -1.5707963267948966,
+        model_position: [0.0, -1.2, 0.0],
+        motors: [
+          {
+            id: 2,
+            name: 'J2',
+            label: '肩部俯仰',
+            axis: 'pitch',
+            vendor: 'robstride',
+            model: 'rs-06',
+            urdf_name: 'joint2',
+            position_limit: [0.0, 3.14],
+            mit_kp: 150.0,
+            mit_kd: 10.0,
+          },
+        ],
+        gripper: {
+          id: 7,
+          name: 'Gripper',
+          label: '夹爪',
+          axis: 'grip',
+          vendor: 'robstride',
+          model: 'rs-00',
+          position_limit: [0.0, 3.0],
+          mit_kp: 50.0,
+          mit_kd: 4.0,
+          left_joint: 'joint_left',
+          right_joint: 'joint_right',
+        },
+      },
+    ],
+    active_arm_id: 'rebot-b601-rs',
+  };
+
+  it('getModels 把后端 snake_case 转成 camelCase 领域模型', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(jsonResponse(RAW_MODELS));
+    stubFetch(fetchFn);
+    const res = await getModels();
+    const arm = res.models[0];
+    expect(arm.motorIds).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(arm.gripperId).toBe(7);
+    expect(arm.jointCount).toBe(6);
+    expect(arm.motors[0].urdfName).toBe('joint2');
+    expect(arm.motors[0].positionLimit).toEqual([0.0, 3.14]);
+    expect(arm.motors[0].mitKp).toBe(150.0);
+    expect(arm.gripper?.leftJoint).toBe('joint_left');
+    expect(arm.modelPosition).toEqual([0.0, -1.2, 0.0]);
+    expect(res.activeArmId).toBe('rebot-b601-rs');
+    expect(fetchFn).toHaveBeenCalledWith(`${API_BASE_URL}/models`, expect.objectContaining({ method: 'GET' }));
   });
 });

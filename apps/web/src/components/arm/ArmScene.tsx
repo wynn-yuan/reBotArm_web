@@ -1,11 +1,11 @@
-import { Suspense, useCallback, useEffect, useMemo, useState } from 'react';
-import { Canvas, useThree } from '@react-three/fiber';
-import { OrbitControls, Grid } from '@react-three/drei';
-import { ArmModel } from './ArmModel';
+import { useLayoutEffect, useMemo, useRef } from 'react';
 import { useTelemetry } from '../../state/TelemetryContext';
-import { computeRobotJointWrites } from '../../telemetry/jointTransform';
+import { useApp } from '../../state/AppContext';
+import { armConfigFromModel, computeRobotJointWrites } from '../../telemetry/jointTransform';
+import type { ArmModel } from '../../types';
+import { useArmViewport, type ArmSlotConfig, type ArmView, type ArmFrameloop } from './ArmViewport';
 
-export type ArmView = 'perspective' | 'front';
+export type { ArmView, ArmFrameloop } from './ArmViewport';
 
 export interface ArmSceneProps {
   height?: number | string;
@@ -13,140 +13,90 @@ export interface ArmSceneProps {
   view?: ArmView;
   /** 仅覆盖 Web 模型的离线预览姿态；不调用 API 或真机。 */
   overridePositions?: readonly number[] | null;
-}
-
-/** OrbitControls 的最小结构类型，避免额外引入 three-stdlib 类型依赖 */
-interface OrbitControlsLike {
-  target: { set: (x: number, y: number, z: number) => void };
-  update: () => void;
-}
-
-/**
- * 模型加载完成前的回退取景中心：
- * 地面位于 y=-1.2，模型基座落地后几何中心必然在地面上方、y 为负值，
- * 绝不能再使用 +0.55（与渲染 group 的 y=-1.2 方向相反）。
- * 模型加载完成后由 ArmModel 回传真实包围盒中心替换。
- */
-const FALLBACK_CENTER: [number, number, number] = [0, -0.6, 0];
-
-/**
- * 相机相对取景中心的偏移（与中心点解耦，中心平移时取景几何不变）。
- * 约 0.6m 的模型在 scale=2.5 下约 1.5 单位高，
- * 视锥 fov=38°、距离约 2.5~2.7 时可明显充满视窗。
- */
-const VIEW_OFFSET: Record<ArmView, [number, number, number]> = {
-  perspective: [1.7, 0.8, 2.05],
-  front: [0, 0.35, 2.55],
-};
-
-/** 相机位置 = 取景中心 + 视图偏移 */
-function cameraPositionFor(
-  view: ArmView,
-  target: [number, number, number],
-): [number, number, number] {
-  const [ox, oy, oz] = VIEW_OFFSET[view];
-  return [target[0] + ox, target[1] + oy, target[2] + oz];
+  /** 指定要渲染的机型（缺省为当前激活机型）。首页卡片预览用。 */
+  arm?: ArmModel | null;
+  /**
+   * 渲染帧策略（透传给常驻单例 Canvas，仅本槽位挂载期间生效）：
+   * - 'always'：每帧无条件重绘 —— 弱 GPU（Jetson 软件 GL）下整场景
+   *   （阴影 + 抗锯齿 + dpr 2）单帧就要数百毫秒，静态画面也会把主线程
+   *   占满导致卡死，引擎默认即此，仅实时遥测视窗沿用。
+   * - 'demand'：仅在姿态/取景真正变化时重绘一帧（见 DemandInvalidator），
+   *   交互视窗与离线预览（动作中心）翻页/静止时零重绘。
+   */
+  frameloop?: ArmFrameloop;
 }
 
 /**
- * 相机取景切换：相机位置 = 动态模型中心 + 固定偏移，OrbitControls target 同步中心；
- * 视角按钮切换后重新以中心取景，之后仍可拖动旋转、滚轮缩放（围绕模型几何中心）。
+ * 实时/离线 3D 视窗。真正的 Canvas 由 ArmViewportProvider 单例常驻，
+ * 本组件只是「槽位」：把自己挂载到场景，publish 渲染配置后经 portal
+ * 把单例 Canvas 渲染进自身 DOM，卸载时退回隐藏回退槽 —— 页面切换只
+ * 移动场景节点，不新建/销毁 GL 上下文，消除「每次进入动作中心卡死」。
  */
-function CameraRig({ view, target }: { view: ArmView; target: [number, number, number] }) {
-  const camera = useThree((s) => s.camera);
-  const controls = useThree((s) => s.controls) as OrbitControlsLike | null;
-
-  useEffect(() => {
-    const [px, py, pz] = cameraPositionFor(view, target);
-    camera.position.set(px, py, pz);
-    if (controls) {
-      controls.target.set(target[0], target[1], target[2]);
-      controls.update();
-    }
-  }, [view, target, camera, controls]);
-
-  return null;
-}
-
-/** 实时监控视窗：Canvas + OrbitControls + 关节角驱动几何变换 */
-export function ArmScene({ height = '100%', view = 'perspective', overridePositions = null }: ArmSceneProps) {
+export function ArmScene({ height = '100%', view = 'perspective', overridePositions = null, arm = null, frameloop = 'always' }: ArmSceneProps) {
   const { frame, comm, stale, wsStatus } = useTelemetry();
+  const { activeArm } = useApp();
+  const displayedArm = arm ?? activeArm;
+  const armCfg = useMemo(() => armConfigFromModel(displayedArm), [displayedArm]);
 
-  // 模型几何中心（场景坐标）：加载完成前用回退中心（地面上方、y 为负），
-  // ArmModel 加载完成后回传真实包围盒中心
-  const [modelCenter, setModelCenter] = useState<[number, number, number]>(FALLBACK_CENTER);
+  const { register, update, unregister, webgl } = useArmViewport();
+  const slotRef = useRef<HTMLDivElement | null>(null);
 
-  // 用 useCallback 稳定回调引用，避免 ArmModel 因引用变化重新加载模型
-  const handleModelCenter = useCallback((center: [number, number, number]) => {
-    setModelCenter(center);
-  }, []);
+  // 槽位配置：显示机型参数 + 取景/帧策略（随 displayedArm/override 变化）
+  const slotConfig = useMemo<ArmSlotConfig>(() => ({
+    urdfUrl: displayedArm ? `/robots/${displayedArm.armId}/model.urdf` : '/robots/rebot-b601-rs/model.urdf',
+    modelScale: displayedArm?.modelScale ?? 2.5,
+    modelRotationX: displayedArm?.modelRotationX ?? -Math.PI / 2,
+    modelPosition: displayedArm?.modelPosition ?? [0, -1.2, 0],
+    armCfg,
+    view,
+    overridePositions,
+    frameloop,
+  }), [displayedArm, armCfg, view, overridePositions, frameloop]);
+
+  // 槽位生命周期：挂载时注册一次（portal 进入本 DOM），卸载退回过退槽。
+  // 依赖只有稳定回调，不随配置变化重建槽位 —— 初始配置经 ref 读取。
+  const initialConfigRef = useRef(slotConfig);
+  useLayoutEffect(() => {
+    const el = slotRef.current;
+    if (!el) return;
+    register(el, initialConfigRef.current);
+    return () => unregister(el);
+  }, [register, unregister]);
+
+  // 配置变化（预览播放/拖动进度条，可高频）：只更新配置，不重建槽位
+  useLayoutEffect(() => {
+    const el = slotRef.current;
+    if (!el) return;
+    update(el, slotConfig);
+  }, [update, slotConfig]);
 
   // 超限关节与夹爪标定状态（只读纯函数，供叠加层告警）
   const mapResult = useMemo(() => {
-    if (overridePositions && overridePositions.length >= 6) {
+    const revoluteIds = armCfg.revoluteIds;
+    if (overridePositions && overridePositions.length >= revoluteIds.length) {
       return computeRobotJointWrites(
-        overridePositions.map((position, index) => ({ id: index + 1, position })),
+        revoluteIds.map((id, index) => ({ id, position: overridePositions[index] ?? null })),
+        armCfg,
       );
     }
-    return frame ? computeRobotJointWrites(frame.joints) : null;
-  }, [frame, overridePositions]);
+    return frame ? computeRobotJointWrites(frame.joints, armCfg) : null;
+  }, [frame, overridePositions, armCfg]);
 
   return (
-    <div className="arm-viewport" style={{ height }}>
-      <Canvas
-        shadows
-        dpr={[1, 2]}
-        camera={{ position: cameraPositionFor('perspective', FALLBACK_CENTER), fov: 38 }}
-        gl={{ antialias: true, alpha: true }}
-        style={{ background: 'transparent' }}
-      >
-        {/* 苹果式浅灰白背景 */}
-        <color attach="background" args={['#f5f5f7']} />
-        <ambientLight intensity={0.65} />
-        {/* 主光：中性白，适合白灰 STL 材质，保留阴影 */}
-        <directionalLight
-          position={[4, 6, 3]}
-          intensity={1.4}
-          color={'#ffffff'}
-          castShadow
-          shadow-mapSize-width={1024}
-          shadow-mapSize-height={1024}
-        />
-        {/* 补光：柔和冷白，提亮暗部 */}
-        <directionalLight position={[-3, 2, -2]} intensity={0.5} color={'#e8ecf2'} />
+    <div ref={slotRef} className="arm-viewport" style={{ height }}>
+      {/* 单例 Canvas 经 portal 渲染进此处（ArmViewportProvider） */}
 
-        <Suspense fallback={null}>
-          <Grid
-            position={[0, -1.2, 0]}
-            args={[14, 14]}
-            cellSize={0.25}
-            cellThickness={0.5}
-            cellColor={'#e3e3e8'}
-            sectionSize={1}
-            sectionThickness={1}
-            sectionColor={'#d4d4da'}
-            fadeDistance={12}
-            fadeStrength={1}
-            followCamera={false}
-            infiniteGrid={false}
-          />
-          <ArmModel onModelCenter={handleModelCenter} overridePositions={overridePositions} />
-        </Suspense>
-
-        <CameraRig view={view} target={modelCenter} />
-
-        <OrbitControls
-          enablePan
-          enableRotate
-          enableZoom
-          zoomToCursor
-          target={modelCenter}
-          minDistance={1.2}
-          maxDistance={8}
-          maxPolarAngle={Math.PI * 0.48}
-          makeDefault
-        />
-      </Canvas>
+      {/* 无 WebGL（本机 Firefox 无 /dev/dri 时不支持硬件加速）：3D 视窗降级为占位，
+          遥测/控制等其余功能不受影响，避免 r3f 抛错掀翻整棵应用树。 */}
+      {!webgl && (
+        <div className="arm-viewport__fallback">
+          <div className="arm-viewport__fallback-title">3D 视窗不可用</div>
+          <div className="arm-viewport__fallback-hint">
+            当前浏览器未开启 WebGL（本机 Firefox 因缺少 /dev/dri 无法创建 GL 上下文）。
+            建议改用 Chrome 查看 3D 模型；遥测与运动控制等其余功能不受影响。
+          </div>
+        </div>
+      )}
 
       {/* 视窗叠加信息 */}
       <div className="arm-viewport__overlay">

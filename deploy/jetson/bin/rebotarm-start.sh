@@ -54,6 +54,28 @@ mkdir -p "$LOG_DIR" "$AGING_LOG_DIR" "$TRAJECTORY_DIR"
 chmod 700 "$AGING_LOG_DIR"
 chmod 700 "$TRAJECTORY_DIR"
 
+# 开机对时（用户选定机制：等待系统 NTP + 应用内 HTTP 对时兜底 的"NTP 一半"）。
+# 尽力而为：最长等 20s；离线/被墙时绝不阻塞启动——服务端另有一次应用内对时，
+# 老化会话日志时间戳始终以校正后的网络时间为准。
+if command -v timedatectl >/dev/null 2>&1; then
+    _SYNCED=0
+    for _i in $(seq 1 20); do
+        if timedatectl status 2>/dev/null | grep -q "System clock synchronized: yes"; then
+            _SYNCED=1
+            break
+        fi
+        sleep 1
+    done
+    if [ "$_SYNCED" -eq 1 ]; then
+        echo "[time sync] system clock synchronized (timesyncd)" >>"$OUT_LOG"
+    else
+        echo "[time sync] WARNING: system clock NOT synchronized within 20s; app-level HTTP time correction applies to aging logs" >>"$OUT_LOG"
+    fi
+    unset _SYNCED _i
+else
+    echo "[time sync] timedatectl unavailable; skipped system NTP wait" >>"$OUT_LOG"
+fi
+
 # Load operator configuration (adapter/channel/gates/...).
 set -a
 # shellcheck disable=SC1090

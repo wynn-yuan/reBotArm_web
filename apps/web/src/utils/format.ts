@@ -44,3 +44,10 @@ export function formatRelative(ts: number): string {
 export function clamp(n: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, n));
 }
+
+/** 连续 ID 列表显示为区间（1–7），否则逗号连接（机型的期望电机 ID 文案用）。 */
+export function formatIdRange(ids: readonly number[]): string {
+  const n = ids.length;
+  if (n > 0 && ids.every((id, i) => id === ids[0] + i)) return `${ids[0]}–${ids[n - 1]}`;
+  return ids.join('、');
+}

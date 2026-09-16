@@ -12,6 +12,7 @@ import {
 import type {
   AgingConfig,
   AgingState,
+  ArmModel,
   ConnectionState,
   ControlMode,
   JointParam,
@@ -28,9 +29,9 @@ import type {
   SafetyState,
   SafetyTrigger,
 } from '../types';
-import { CONTROL_MODE_LABEL, READONLY_REASON } from '../types';
+import { CONTROL_MODE_LABEL, READONLY_REASON, armJointCount } from '../types';
 import { makeId, makeSeedJointParams } from '../data/simulatedTelemetry';
-import { getConnection, postDisable, postScan, postDisconnect, toErrorMessage } from '../api/client';
+import { getConnection, getModels, postDisable, postScan, postDisconnect, deleteActiveModel, setActiveModel, toErrorMessage } from '../api/client';
 import {
   deleteAgingAction,
   getAgingActions,
@@ -75,6 +76,10 @@ interface AppState {
 
   /** 机械臂连接状态（完全来自后端 /api/robot/* 返回） */
   connection: ConnectionState;
+
+  /** 注册表全部机型与激活机型（来自 /api/models，后端唯一真源） */
+  models: ArmModel[];
+  activeArm: ArmModel | null;
 }
 
 type Action =
@@ -111,7 +116,9 @@ type Action =
   | { type: 'PARAMS_SET_ZERO'; payload: { now: number } }
   | { type: 'CONNECTION_SET'; payload: RobotConnection }
   | { type: 'CONNECTION_SCAN_START' }
-  | { type: 'CONNECTION_ERROR'; payload: { error: string } };
+  | { type: 'CONNECTION_ERROR'; payload: { error: string } }
+  | { type: 'MODELS_LOAD'; payload: { models: ArmModel[]; activeArmId: string | null } }
+  | { type: 'MODELS_ACTIVE_SET'; payload: ArmModel };
 
 // 互斥模式集合
 const BUSINESS_MODES: ControlMode[] = ['teach_record', 'playback', 'aging'];
@@ -147,7 +154,7 @@ function reducer(state: AppState, action: Action): AppState {
           controlMode: 'teach_record',
           playback: null,
           aging: null,
-          recordingBuffer: Array.from({ length: 7 }, () => []),
+          recordingBuffer: Array.from({ length: armJointCount(state.activeArm) }, () => []),
         };
       }
       if (action.mode === 'playback') {
@@ -206,7 +213,7 @@ function reducer(state: AppState, action: Action): AppState {
           status: 'countdown',
           recordingStartTime: recordingStartTime ?? null,
         },
-        recordingBuffer: Array.from({ length: 7 }, () => []),
+        recordingBuffer: Array.from({ length: armJointCount(state.activeArm) }, () => []),
         recordingTimedSamples: [],
       };
     }
@@ -547,6 +554,19 @@ function reducer(state: AppState, action: Action): AppState {
       // 409 / 网络错误：不得伪装成 connected，展示错误并清除在途标志
       return { ...state, connection: connectionReducer(state.connection, action) };
 
+    case 'MODELS_LOAD':
+      return {
+        ...state,
+        models: action.payload.models,
+        activeArm:
+          state.activeArm ??
+          action.payload.models.find((m) => m.armId === action.payload.activeArmId) ??
+          null,
+      };
+
+    case 'MODELS_ACTIVE_SET':
+      return { ...state, activeArm: action.payload };
+
     default:
       return state;
   }
@@ -568,12 +588,21 @@ const INITIAL_STATE: AppState = {
   recordingBuffer: [],
   recordingTimedSamples: [],
   connection: INITIAL_CONNECTION,
+  models: [],
+  activeArm: null,
 };
 
 // ===== Context =====
 
 export interface AppContextValue {
   state: AppState;
+  // 机型注册表（后端唯一真源；首页模型选择 / 消费端去硬编码）
+  models: ArmModel[];
+  activeArm: ArmModel | null;
+  /** 切换激活机型（后端需 disconnected，否则 409 抛出 ApiError）。 */
+  switchArm: (armId: string) => Promise<void>;
+  /** 取消激活：回落出厂默认机型（同样需 disconnected）。 */
+  deactivateArm: () => Promise<void>;
   // 机械臂连接（模拟适配器）
   /** 是否已连接（1..7 全部发现） */
   robotConnected: boolean;
@@ -803,6 +832,32 @@ export function AppProvider({ children }: { children: ReactNode }) {
     void loadActionsFromServer();
   }, [loadActionsFromServer]);
 
+  /** 启动时加载机型注册表并恢复激活机型（GET /api/models）。 */
+  const initializeModels = useCallback(async () => {
+    try {
+      const res = await getModels();
+      dispatch({ type: 'MODELS_LOAD', payload: res });
+    } catch {
+      // 后端不可达：列表为空，页面展示提示；不影响连接状态恢复。
+    }
+  }, []);
+
+  useEffect(() => {
+    void initializeModels();
+  }, [initializeModels]);
+
+  /** 切换激活机型：后端校验 disconnected，否则抛 ApiError(code=must_disconnect_first)。 */
+  const switchArm = useCallback(async (armId: string) => {
+    const res = await setActiveModel(armId);
+    dispatch({ type: 'MODELS_ACTIVE_SET', payload: res.model });
+  }, []);
+
+  /** 取消激活：回落出厂默认机型（后端校验 disconnected）。 */
+  const deactivateArm = useCallback(async () => {
+    const res = await deleteActiveModel();
+    dispatch({ type: 'MODELS_ACTIVE_SET', payload: res.model });
+  }, []);
+
   /** 顶部「连接机械臂」：调用 POST /api/robot/scan（只读扫描，阻塞至后端返回）。 */
   const startConnectionScan = useCallback(async () => {
     // 二次守卫：请求在途时不重复发起（防重复点击）
@@ -923,7 +978,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       if (!recording) return;
       const commit = options?.commit ?? true;
       const reentry: 'idle' = options?.reentry ?? 'idle';
-      const hasCompleteBuffer = recordingBuffer.length === 7 && recordingBuffer.every((trail) => trail.length > 0);
+      const hasCompleteBuffer = recordingBuffer.length === armJointCount(state.activeArm) && recordingBuffer.every((trail) => trail.length > 0);
       if (commit && recording.status === 'recording' && hasCompleteBuffer) {
         const sampleCount = recordingBuffer[0].length;
         const timedSamples = state.recordingTimedSamples.length > 0
@@ -942,7 +997,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
           durationMs,
           sampleCount,
           samplingHz: recording.samplingHz,
-          jointCount: 7,
+          jointCount: recordingBuffer.length,
           trails: recordingBuffer.map((trail) => [...trail]),
           timedSamples,
           version: 'raw',
@@ -1408,6 +1463,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const value = useMemo<AppContextValue>(
     () => ({
       state,
+      models: state.models,
+      activeArm: state.activeArm,
+      switchArm,
+      deactivateArm,
       robotConnected,
       startConnectionScan,
       disconnectRobot,
@@ -1453,6 +1512,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }),
     [
       state,
+      switchArm,
+      deactivateArm,
       robotConnected,
       startConnectionScan,
       disconnectRobot,

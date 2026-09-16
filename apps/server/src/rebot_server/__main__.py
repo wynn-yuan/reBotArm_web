@@ -37,6 +37,15 @@ def main() -> int:
         )
         return 2
 
+    # 每次启动网络对时一次（HTTP Date 头取时，成功/失败均记日志，之后可离线）。
+    # 外层兜底：对时的内部故障绝不允许阻塞启动。
+    from .timesync import sync_device_clock_once
+
+    try:
+        sync_device_clock_once()
+    except Exception as exc:  # pragma: no cover - defensive only
+        logger.exception("time sync threw unexpectedly: %s: %s", type(exc).__name__, exc)
+
     from .app import create_app
 
     try:

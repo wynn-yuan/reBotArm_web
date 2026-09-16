@@ -27,6 +27,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from dataclasses import replace
 from typing import Any, Dict, Sequence
 
 from .config import validate_channel
@@ -161,6 +162,23 @@ class ScanService:
         """
         with self._state_lock:
             return self._generation
+
+    def replace_scanner(self, scanner: CanScanner, expected_ids: Sequence[int]) -> None:
+        """机型切换后换出 scanner 与期望 ID（仅在 disconnected 状态下调用）。
+
+        api.py 选择激活机型时会先确认处于 disconnected；切换只影响下一次
+        ``run_scan``，绝不碰已释放的旧 scanner。
+        """
+        expected = tuple(expected_ids)
+        with self._scan_lock:
+            self._scanner = scanner
+            self._expected_ids = expected
+            self._state = replace(
+                self._state,
+                expected_ids=expected,
+                missing_ids=tuple(i for i in expected if i not in self._state.found_ids),
+            )
+            self._zero_status["motor_ids"] = list(expected)
 
     def snapshot(self) -> Dict[str, Any]:
         """Return a copy of the current connection state (the last result)."""

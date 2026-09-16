@@ -45,7 +45,7 @@ class RecordingScanner:
         self.calls.append(("send_mit", 0.0, 0.0, 0.0, 0.0, 0.0))
         self.zero_send.set()
 
-    def send_aging_mit(self, positions):
+    def send_aging_mit(self, positions, gravity_torque=None):
         self.calls.append(("send_mit", tuple(positions), 0.0, 0.0, 0.0))
 
     def write_persistent_gains(self, changes):

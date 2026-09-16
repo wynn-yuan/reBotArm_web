@@ -19,18 +19,25 @@ read-only guarantee — any forbidden SDK call is trapped loudly by the fakes'
 from __future__ import annotations
 
 import sys
+import tempfile
 import types
 import unittest
+from pathlib import Path
 
+import yaml
+
+from rebot_server.arm_registry import load_arm_by_id
 from rebot_server.config import ADAPTER_MOTORBRIDGE, Settings
 from rebot_server.models import EXPECTED_MOTOR_IDS
 from rebot_server.scanners import create_scanner
 from rebot_server.scanners.motorbridge import (
     FORBIDDEN_SDK_CALLS,
-    MOTOR_MODELS,
     MotorbridgeCanScanner,
 )
 from rebot_server.sdkcheck import REQUIRED_MOTORBRIDGE_VERSION
+
+#: 历史 B601 电机型号（arm=None 时的回落；生产走 arm=settings.arm）。
+MODELS = {1: "rs-06", 2: "rs-06", 3: "rs-06", 4: "rs-00", 5: "rs-00", 6: "rs-00", 7: "rs-00"}
 
 
 class FakeSdk:
@@ -292,15 +299,50 @@ class MotorbridgeScannerTests(unittest.TestCase):
         self.assertEqual(
             adds,
             [
-                ("ctrl", "add_robstride_motor", (mid, 0xFD, MOTOR_MODELS[mid]), {})
+                ("ctrl", "add_robstride_motor", (mid, 0xFD, MODELS[mid]), {})
                 for mid in range(1, 8)
             ],
         )
         # Hardware mapping from rebotarm_rs.yaml: J1–J3 rs-06, J4–J7 rs-00.
-        self.assertEqual(MOTOR_MODELS[1], "rs-06")
-        self.assertEqual(MOTOR_MODELS[3], "rs-06")
-        self.assertEqual(MOTOR_MODELS[4], "rs-00")
-        self.assertEqual(MOTOR_MODELS[7], "rs-00")
+        self.assertEqual(MODELS[1], "rs-06")
+        self.assertEqual(MODELS[3], "rs-06")
+        self.assertEqual(MODELS[4], "rs-00")
+        self.assertEqual(MODELS[7], "rs-00")
+
+    def test_scan_uses_arm_vendor_dispatch(self):
+        """激活机型驱动厂商分发：damiao 电机走 add_damiao_motor(fid, model)。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            arm_dir = Path(tmp) / "dm"
+            arm_dir.mkdir()
+            (arm_dir / "model.yaml").write_text(
+                yaml.safe_dump(
+                    {
+                        "name": "damiao-test",
+                        "motors": [{"id": 1, "model": "4310", "vendor": "damiao"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            arm = load_arm_by_id("dm", root=Path(tmp))
+
+        def add_damiao_motor(self, motor_id, feedback_id, model):
+            FakeSdk.calls.append(
+                ("ctrl", "add_damiao_motor", (motor_id, feedback_id, model), {})
+            )
+            return FakeMotor(motor_id, feedback_id, model)
+
+        FakeController.add_damiao_motor = add_damiao_motor
+        try:
+            self._install_fake_sdk()
+            outcome = MotorbridgeCanScanner(host_id=0xFD, arm=arm).scan("can0", (1,))
+            self.assertEqual(outcome.errors, {})
+            self.assertEqual(outcome.found_ids, (1,))
+            self.assertEqual(
+                FakeSdk.ctrl_calls("add_damiao_motor"),
+                [("ctrl", "add_damiao_motor", (1, 0xFD, "4310"), {})],
+            )
+        finally:
+            del FakeController.add_damiao_motor
 
     def test_ping_runs_serially_1_to_7_with_host_id_and_timeout(self):
         self._install_fake_sdk()

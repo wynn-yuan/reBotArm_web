@@ -4,7 +4,7 @@
  * 地址由 VITE_API_BASE_URL 配置，默认使用同源 `/api`。
  * 连接、人工 enable/disable、持久增益和后端零力矩状态机接口均在此集中管理。
  */
-import type { HealthCapabilities, RecordedAction, RobotConnection, ZeroTorqueStatus } from '../types';
+import type { ArmModel, GripperConfig, HealthCapabilities, JointAxis, MotorParam, RecordedAction, RobotConnection, ZeroTorqueStatus } from '../types';
 import { FAIL_CLOSED_CAPABILITIES } from '../types';
 
 export const DEFAULT_API_BASE = '/api';
@@ -251,6 +251,129 @@ export async function getHealth(): Promise<HealthResponse> {
   const raw = await request<HealthResponse>('/health');
   // fail closed：不信任后端字段类型，capabilities 一律经严格解析归一化
   return { ...raw, capabilities: parseHealthCapabilities(raw.capabilities) };
+}
+
+// ===== 机型注册表（产线通用平台：后端是唯一真源） =====
+
+export interface ModelsResponse {
+  models: ArmModel[];
+  activeArmId: string | null;
+}
+
+export interface ActiveModelResponse {
+  model: ArmModel;
+  armId: string;
+}
+
+/** GET /api/models —— 注册表全部机型 + 激活机型 arm_id（首页列表/预览用）。 */
+export async function getModels(): Promise<ModelsResponse> {
+  const raw = await request<{ models: RawArmModel[]; active_arm_id: string | null }>('/models');
+  return { models: (raw.models ?? []).map(toArmModel), activeArmId: raw.active_arm_id ?? null };
+}
+
+/** GET /api/models/active —— 当前激活机型（404 = 后端无激活机型）。 */
+export async function getActiveModel(): Promise<ActiveModelResponse> {
+  const raw = await request<{ model: RawArmModel; arm_id: string }>('/models/active');
+  return { model: toArmModel(raw.model), armId: raw.arm_id };
+}
+
+/**
+ * POST /api/models/active —— 切换激活机型。
+ * 连接未断开时后端返回 409（code=must_disconnect_first，走此函数抛出的 ApiError）。
+ */
+export async function setActiveModel(armId: string): Promise<ActiveModelResponse> {
+  const raw = await request<{ model: RawArmModel; arm_id: string }>('/models/active', {
+    method: 'POST',
+    body: JSON.stringify({ arm_id: armId }),
+  });
+  return { model: toArmModel(raw.model), armId: raw.arm_id };
+}
+
+/** DELETE /api/models/active —— 取消激活，回落出厂默认机型（同样要求已断开）。 */
+export async function deleteActiveModel(): Promise<ActiveModelResponse> {
+  const raw = await request<{ model: RawArmModel; arm_id: string }>('/models/active', {
+    method: 'DELETE',
+  });
+  return { model: toArmModel(raw.model), armId: raw.arm_id };
+}
+
+/** 后端 model.yaml /api/models 序列化为 snake_case；此处转成前端 camelCase 领域模型。 */
+interface RawArmMotor {
+  id: number;
+  name: string;
+  label: string;
+  axis: JointAxis;
+  vendor: string;
+  model: string;
+  urdf_name?: string;
+  position_limit?: [number, number] | null;
+  mit_kp?: number | null;
+  mit_kd?: number | null;
+}
+
+interface RawArmGripper extends RawArmMotor {
+  left_joint?: string;
+  right_joint?: string;
+}
+
+interface RawArmModel {
+  arm_id: string;
+  name: string;
+  vendor: string;
+  host_id: number;
+  joint_count: number;
+  motor_ids: number[];
+  gripper_id: number | null;
+  model_scale: number;
+  model_rotation_x: number;
+  model_position: number[];
+  motors: RawArmMotor[];
+  gripper: RawArmGripper | null;
+}
+
+function toArmModel(raw: RawArmModel): ArmModel {
+  const motors: MotorParam[] = (raw.motors ?? []).map((m) => ({
+    id: m.id,
+    name: m.name,
+    label: m.label,
+    axis: m.axis,
+    vendor: m.vendor,
+    model: m.model,
+    urdfName: m.urdf_name,
+    positionLimit: m.position_limit ?? null,
+    mitKp: m.mit_kp ?? null,
+    mitKd: m.mit_kd ?? null,
+  }));
+  const g = raw.gripper;
+  const gripper: GripperConfig | null = g
+    ? {
+        id: g.id,
+        name: g.name,
+        label: g.label,
+        axis: g.axis,
+        vendor: g.vendor,
+        model: g.model,
+        positionLimit: g.position_limit ?? null,
+        mitKp: g.mit_kp ?? null,
+        mitKd: g.mit_kd ?? null,
+        leftJoint: g.left_joint ?? '',
+        rightJoint: g.right_joint ?? '',
+      }
+    : null;
+  return {
+    armId: raw.arm_id,
+    name: raw.name,
+    vendor: raw.vendor,
+    hostId: raw.host_id,
+    jointCount: raw.joint_count,
+    motorIds: raw.motor_ids ?? [],
+    gripperId: raw.gripper_id ?? null,
+    modelScale: raw.model_scale,
+    modelRotationX: raw.model_rotation_x,
+    modelPosition: raw.model_position as [number, number, number],
+    motors,
+    gripper,
+  };
 }
 
 /** GET /api/robot/connection —— 恢复后端连接状态（capabilities 严格解析）。 */

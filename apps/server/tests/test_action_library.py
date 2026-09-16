@@ -37,17 +37,18 @@ except Exception:  # ImportError or broken install
 
 def make_processed_action(action_id: str = "processed-1700000000-abc123") -> dict:
     """A valid processed action the aging runtime will accept (all-zero home)."""
-    # 50 samples at 50 Hz = 1 s. All-zero positions keep every joint in limits
-    # and every inter-sample velocity at zero.
-    trail = [0.0] * 50
+    # 100 samples at 100 Hz = 1 s (the runtime requires CONTROL_HZ = 100 Hz).
+    # All-zero positions keep every joint in limits and every inter-sample
+    # velocity at zero.
+    trail = [0.0] * 100
     return {
         "id": action_id,
         "name": "测试动作",
         "version": "processed",
         "createdAt": 1700000000000,
         "durationMs": 1000,
-        "sampleCount": 50,
-        "samplingHz": 50,
+        "sampleCount": 100,
+        "samplingHz": 100,
         "jointCount": 7,
         "rawActionId": "raw-abc",
         "trails": [list(trail) for _ in range(7)],

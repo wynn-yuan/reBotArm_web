@@ -8,6 +8,7 @@ import {
   type TelemetryClientState,
 } from '../telemetry/telemetryClient';
 import type { TrendSeries, TrendWindow, WsTelemetryStatus } from '../types';
+import { armJointIds } from '../types';
 
 /**
  * WebSocket 只读遥测全局状态（/ws/robot/telemetry）。
@@ -59,6 +60,12 @@ const TelemetryContext = createContext<TelemetryContextValue | null>(null);
 export function TelemetryProvider({ children }: { children: ReactNode }) {
   const { state } = useApp();
   const connection = state.connection;
+  const activeArm = state.activeArm;
+  // 期望电机 ID 来自激活机型（仅机型变化时重建 client）
+  const expectedIds = useMemo(
+    () => (activeArm ? armJointIds(activeArm) : undefined),
+    [activeArm],
+  );
   // 仅当连接状态 connected 且 capabilities.telemetry 时自动连接（要求 1）
   const connectionStatus = connection.status;
   const telemetryCapability = connection.capabilities.telemetry === true;
@@ -86,6 +93,7 @@ export function TelemetryProvider({ children }: { children: ReactNode }) {
     const client = new TelemetryClient({
       url: resolveTelemetryWsUrl(),
       onChange: (s) => setSnap(s),
+      expectedIds,
     });
     clientRef.current = client;
     client.start();
@@ -97,7 +105,7 @@ export function TelemetryProvider({ children }: { children: ReactNode }) {
         setSnap(initialTelemetryState());
       }
     };
-  }, [shouldConnect]);
+  }, [shouldConnect, expectedIds]);
 
   const getTrends = useCallback((): TrendSeries[] => {
     const client = clientRef.current;

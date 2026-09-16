@@ -17,6 +17,7 @@ from typing import Any, Mapping, Sequence
 from .aging_recorder import AgingRecorder
 from .config import ADAPTER_MOTORBRIDGE
 from .models import utc_now_iso
+from .timesync import clock_now_iso
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +41,8 @@ FOLLOWING_ERROR_RAD = 0.5
 # of tracking (3 frames under the same error) will.
 FOLLOWING_ERROR_CONSECUTIVE_LIMIT = 3
 MAX_TRAJECTORY_SAMPLES = 250_000
-JOINT_POSITION_LIMITS = (
+#: 历史 B601 关节限位（无 arm 时的回落；生产走 settings.arm.joint_positions）。
+_LEGACY_JOINT_LIMITS = (
     (-2.8, 2.8),
     (0.0, 3.14),
     (0.0, 3.14),
@@ -92,6 +94,13 @@ class AgingRuntime:
         self._service = service
         self._recorder = recorder
         self._gravity = gravity_model  # GravityModel | None
+        arm = getattr(settings, "arm", None)
+        # 完整链路（转动关节 + 夹爪）限位/计数；无 arm 时回落历史 B601。
+        self._joint_limits = arm.joint_positions if arm is not None else _LEGACY_JOINT_LIMITS
+        self._joint_count = len(self._joint_limits)
+        self._expected_ids = (
+            arm.joint_ids if arm is not None else tuple(range(1, self._joint_count + 1))
+        )
         self._home_tolerance = getattr(settings, "home_tolerance_rad", HOME_TOLERANCE_RAD)
         self._home_verify_mode = getattr(settings, "home_verify_mode", "warn")
         self._lock = threading.RLock()
@@ -114,6 +123,7 @@ class AgingRuntime:
             "completed_rounds": 0,
             "target_rounds": None,
             "started_at": None,
+            "ended_at": None,
             "updated_at": utc_now_iso(),
             "stop_requested": False,
             "temp_limit_c": None,
@@ -185,7 +195,8 @@ class AgingRuntime:
                 round=0,
                 completed_rounds=0,
                 target_rounds=normalized_config.get("loop_count"),
-                started_at=utc_now_iso(),
+                started_at=clock_now_iso(),
+                ended_at=None,
                 updated_at=utc_now_iso(),
                 stop_requested=False,
                 temp_limit_c=self._temp_limit_c,
@@ -193,6 +204,16 @@ class AgingRuntime:
                 error=None,
                 elapsed_seconds=0.0,
             )
+        logger.info(
+            "aging session starting",
+            extra={
+                "type": "aging_session_starting",
+                "action_id": normalized_action["id"],
+                "action_name": normalized_action["name"],
+                "loop_mode": normalized_config["loop_mode"],
+                "started_at": self._status["started_at"],
+            },
+        )
 
         try:
             self._recorder.start(
@@ -227,9 +248,23 @@ class AgingRuntime:
                 self._status.update(
                     status="error",
                     phase="failed",
+                    started_at=self._status["started_at"],
+                    ended_at=clock_now_iso(),
                     updated_at=utc_now_iso(),
                     error=f"{type(exc).__name__}: {exc}",
                 )
+            logger.warning(
+                "aging session ended",
+                extra={
+                    "type": "aging_session_ended",
+                    "status": "error",
+                    "action_id": self._status["action_id"],
+                    "started_at": self._status["started_at"],
+                    "ended_at": self._status["ended_at"],
+                    "elapsed_seconds": 0.0,
+                    "error": f"{type(exc).__name__}: {exc}",
+                },
+            )
             raise AgingRuntimeError(str(exc)) from None
         return self.status()
 
@@ -373,6 +408,11 @@ class AgingRuntime:
                 error = f"{error}; cleanup: {type(cleanup_exc).__name__}: {cleanup_exc}"
                 logger.error("aging cleanup failed: %s", cleanup_exc)
         finally:
+            # 唯一终态出口：正常完成/手动停止/通信丢失(held)/安全故障/清理失败
+            # 全部汇聚于此，统一记录墙钟结束时间并输出日志。
+            ended_at = clock_now_iso()
+            started_at = self._status.get("started_at")
+            elapsed = time.monotonic() - started
             try:
                 self._service.finish_aging_motion(disable=disable)
             except Exception as exc:
@@ -381,9 +421,12 @@ class AgingRuntime:
                 error = error or f"cleanup failed: {type(exc).__name__}: {exc}"
             self._try_append_event({
                 "type": "stopped",
+                "at": ended_at,
+                "started_at": started_at,
+                "ended_at": ended_at,
                 "status": final_status,
                 "error": error,
-                "elapsed_seconds": time.monotonic() - started,
+                "elapsed_seconds": round(elapsed, 3),
             })
             self._recorder.stop()
             with self._lock:
@@ -391,10 +434,24 @@ class AgingRuntime:
                 self._status.update(
                     status=final_status,
                     phase=final_phase,
-                    updated_at=utc_now_iso(),
+                    started_at=started_at,
+                    ended_at=ended_at,
+                    updated_at=ended_at,
                     error=error,
-                    elapsed_seconds=time.monotonic() - started,
+                    elapsed_seconds=round(elapsed, 3),
                 )
+            (logger.warning if final_status in {"held", "error"} else logger.info)(
+                "aging session ended",
+                extra={
+                    "type": "aging_session_ended",
+                    "status": final_status,
+                    "action_id": self._status.get("action_id"),
+                    "started_at": started_at,
+                    "ended_at": ended_at,
+                    "elapsed_seconds": round(elapsed, 3),
+                    "error": error,
+                },
+            )
 
     def _check_temperature(self) -> tuple[int, float, float] | None:
         """Return ``(joint_id, temperature, limit)`` of the first joint whose MOS
@@ -474,7 +531,7 @@ class AgingRuntime:
         should not abort the homing sequence.
         """
         start = self._fresh_positions(check_status=check_status)
-        max_error = max(abs(float(target[i]) - start[i]) for i in range(7))
+        max_error = max(abs(float(target[i]) - start[i]) for i in range(self._joint_count))
         if max_error <= self._home_tolerance:
             return
         duration = min(HOME_TIMEOUT_S - 3.0, max(0.2, 2.0 * max_error / HOME_SPEED_RAD_S))
@@ -487,13 +544,17 @@ class AgingRuntime:
                 return
             s = index / steps
             blend = 10.0 * s**3 - 15.0 * s**4 + 6.0 * s**5
-            sample = [start[j] + (float(target[j]) - start[j]) * blend for j in range(7)]
+            sample = [start[j] + (float(target[j]) - start[j]) * blend for j in range(self._joint_count)]
             self._send(sample, capped_limits)
             deadline += CONTROL_PERIOD_S
             deadline = self._pace(deadline)
 
     def _home(self) -> None:
-        self._move_smooth([0.0] * 7, [HOME_SPEED_RAD_S] * 7, self.status()["phase"])
+        self._move_smooth(
+            [0.0] * self._joint_count,
+            [HOME_SPEED_RAD_S] * self._joint_count,
+            self.status()["phase"],
+        )
         self._verify_home()
 
     def _verify_home(self) -> None:
@@ -507,7 +568,7 @@ class AgingRuntime:
         try:
             positions = self._fresh_positions(check_status=False)
         except Exception:
-            positions = [0.0] * 7
+            positions = [0.0] * self._joint_count
         max_error = max(abs(float(v)) for v in positions)
         self._try_append_event({
             "type": "home_verification_failed",
@@ -529,7 +590,7 @@ class AgingRuntime:
 
     def _send(self, target: Sequence[float], velocity_limits: Sequence[float]) -> None:
         positions = self._fresh_positions(check_status=True)
-        error = max(abs(positions[i] - float(target[i])) for i in range(7))
+        error = max(abs(positions[i] - float(target[i])) for i in range(self._joint_count))
         if error > FOLLOWING_ERROR_RAD:
             self._following_error_count += 1
             if self._following_error_count >= FOLLOWING_ERROR_CONSECUTIVE_LIMIT:
@@ -563,12 +624,15 @@ class AgingRuntime:
         if frame.get("source") != "motorbridge":
             raise AgingCommunicationLost("aging requires real motorbridge telemetry")
         joints = frame.get("joints")
-        if not isinstance(joints, list) or len(joints) != 7:
-            raise AgingCommunicationLost("real telemetry must contain seven joints")
-        ordered = sorted(joints, key=lambda item: item.get("id", 0))
+        if not isinstance(joints, list) or len(joints) != self._joint_count:
+            raise AgingCommunicationLost(
+                f"real telemetry must contain {self._joint_count} joints"
+            )
+        by_id = {joint.get("id"): joint for joint in joints}
         positions: list[float] = []
-        for expected_id, joint in enumerate(ordered, 1):
-            if joint.get("id") != expected_id or joint.get("freshness") != "fresh":
+        for expected_id in self._expected_ids:
+            joint = by_id.get(expected_id)
+            if joint is None or joint.get("freshness") != "fresh":
                 raise AgingCommunicationLost(f"joint {expected_id} telemetry is not fresh")
             position = joint.get("position")
             if not _finite(position):
@@ -638,25 +702,36 @@ class AgingRuntime:
             return time.monotonic() - started >= config["duration_sec"]
         return False
 
-    @staticmethod
+    def validate_draft(
+        self, action: Mapping[str, Any]
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """API 草稿校验：按 count 模式预跑一次 ``_validate``，不启动任何电机。"""
+        return self._validate(
+            action, {"loop_mode": "count", "loop_count": 1, "interval_sec": 0}
+        )
+
     def _validate(
-        action: Mapping[str, Any], config: Mapping[str, Any]
+        self, action: Mapping[str, Any], config: Mapping[str, Any]
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         if action.get("version") != "processed":
             raise AgingValidationError("aging requires a processed action")
         trails = action.get("trails")
-        if not isinstance(trails, list) or len(trails) != 7:
-            raise AgingValidationError("processed action must contain seven joint trails")
+        if not isinstance(trails, list) or len(trails) != self._joint_count:
+            raise AgingValidationError(
+                f"processed action must contain {self._joint_count} joint trails"
+            )
         lengths = {len(trail) for trail in trails if isinstance(trail, list)}
         if len(lengths) != 1 or len(lengths) == 0:
-            raise AgingValidationError("all seven trails must have the same length")
+            raise AgingValidationError(
+                f"all {self._joint_count} trails must have the same length"
+            )
         sample_count = next(iter(lengths))
         if sample_count < 2 or sample_count > MAX_TRAJECTORY_SAMPLES:
             raise AgingValidationError("processed action sample count is out of range")
         if any(not _finite(value) for trail in trails for value in trail):
             raise AgingValidationError("processed action contains a non-finite position")
         for joint, trail in enumerate(trails):
-            lower, upper = JOINT_POSITION_LIMITS[joint]
+            lower, upper = self._joint_limits[joint]
             if any(float(value) < lower or float(value) > upper for value in trail):
                 raise AgingValidationError(f"joint {joint + 1} exceeds its position limit")
         sampling_hz = action.get("samplingHz")
@@ -666,17 +741,19 @@ class AgingRuntime:
         velocity_limits = processing.get("maxJointVelocity") if isinstance(processing, Mapping) else None
         if (
             not isinstance(velocity_limits, list)
-            or len(velocity_limits) != 7
+            or len(velocity_limits) != self._joint_count
             or any(not _finite(v) or float(v) <= 0.0 or float(v) > 10.0 for v in velocity_limits)
         ):
-            raise AgingValidationError("processed action requires seven valid velocity limits")
+            raise AgingValidationError(
+                f"processed action requires {self._joint_count} valid velocity limits"
+            )
         for joint, trail in enumerate(trails):
             limit = float(velocity_limits[joint]) * 1.01
             for index in range(1, sample_count):
                 velocity = abs(float(trail[index]) - float(trail[index - 1])) * CONTROL_HZ
                 if velocity > limit + 1e-9:
                     raise AgingValidationError(f"joint {joint + 1} exceeds its velocity limit")
-        samples = [[float(trails[j][i]) for j in range(7)] for i in range(sample_count)]
+        samples = [[float(trails[j][i]) for j in range(self._joint_count)] for i in range(sample_count)]
 
         loop_mode = config.get("loop_mode")
         if loop_mode not in {"count", "duration", "infinite"}:

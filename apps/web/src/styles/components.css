@@ -996,6 +996,9 @@
   position: relative;
   overflow: hidden;
   min-height: 360px;
+  /* 4K 屏后备缓冲封顶（dpr=1 时画布像素≤1280 CSS px），避免巨型画布拖死弱 GPU */
+  max-width: 1280px;
+  margin-inline: auto;
 }
 
 .arm-viewport__overlay {
@@ -1035,12 +1038,41 @@
   border: none;
   border-radius: var(--radius-sm);
   padding: var(--space-2);
+  /* portal 渲染的 canvas 是本 div 的 DOM 后续兄弟，需保证图例盖在画布上方 */
+  z-index: 5;
 }
 
 .arm-viewport__legend-row {
   display: flex;
   align-items: center;
   gap: 6px;
+}
+
+/* 无 WebGL 环境（本机 Firefox）下 3D 视窗的降级占位 */
+.arm-viewport__fallback {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  padding: var(--space-6);
+  text-align: center;
+  z-index: 3;
+}
+
+.arm-viewport__fallback-title {
+  font-size: var(--font-md);
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.arm-viewport__fallback-hint {
+  font-size: var(--font-sm);
+  color: var(--text-tertiary);
+  max-width: 520px;
+  line-height: 1.6;
 }
 
 /* ===== 可拖拽高度手柄 ===== */
@@ -1365,4 +1397,20 @@
   .page {
     padding: var(--space-3) var(--space-3);
   }
+}
+
+/* ===== 首页机型选择 ===== */
+.models-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: var(--space-4);
+}
+
+.model-card--active {
+  border-color: var(--color-online-border);
+}
+
+.model-card__actions {
+  display: flex;
+  gap: var(--space-2);
 }

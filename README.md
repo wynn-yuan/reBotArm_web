@@ -20,8 +20,8 @@ reBotArm_web/
 │   ├── web/                    React 18 + TypeScript + Vite + R3F 前端
 │   └── server/                 FastAPI + motorbridge 0.5.1 后端
 ├── packages/
-│   ├── robot-description/      机器人 URDF 模型与 mesh 文件
-│   └── shared/                 共享协议预留目录
+│   ├── arm-models/              机械臂机型库（每款机型一个文件夹：model.yaml + URDF + meshes）
+│   └── shared/                  共享协议预留目录
 ├── docs/
 │   ├── product/                UI 规格
 │   └── architecture/           项目结构与目录职责
