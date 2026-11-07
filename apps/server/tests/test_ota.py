@@ -12,9 +12,30 @@ from rebot_server.ota import (
     _current_release_id,
     _deployment_release_id,
     _download_asset,
+    _pick_asset,
     _same_build,
     _write_progress,
 )
+
+
+class PickAssetTests(unittest.TestCase):
+    def test_prefers_update_package_over_install_package(self):
+        assets = [
+            {"name": "rebotarm-release-v1.tar.gz", "browser_download_url": "https://example/install"},
+            {"name": "rebotarm-update-v1.tar.gz", "browser_download_url": "https://example/update"},
+        ]
+        self.assertEqual(_pick_asset(assets)["browser_download_url"], "https://example/update")
+
+    def test_falls_back_to_install_package_for_old_releases(self):
+        assets = [
+            {"name": "notes.txt", "browser_download_url": "https://example/notes"},
+            {"name": "rebotarm-release-v1.tar.gz", "browser_download_url": "https://example/install"},
+        ]
+        self.assertEqual(_pick_asset(assets)["browser_download_url"], "https://example/install")
+
+    def test_returns_none_when_no_tarball(self):
+        self.assertIsNone(_pick_asset([]))
+        self.assertIsNone(_pick_asset([{"name": "notes.txt", "browser_download_url": "https://example/n"}]))
 
 
 class SameBuildTests(unittest.TestCase):

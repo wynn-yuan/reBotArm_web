@@ -6,7 +6,8 @@
 # Usage:
 #   sh deploy/jetson/make_release.sh [release-id]
 # Output:
-#   deploy/jetson/out/rebotarm-release-<release-id>.tar.gz
+#   deploy/jetson/out/rebotarm-release-<release-id>.tar.gz  (安装包, full)
+#   deploy/jetson/out/rebotarm-update-<release-id>.tar.gz   (更新包, no STL meshes)
 #
 # Tarball layout (consumed by install_release.sh ON the Jetson):
 #   VERSION
@@ -63,8 +64,19 @@ mkdir -p "$OUT_DIR"
 TARBALL="$OUT_DIR/rebotarm-release-$RELEASE_ID.tar.gz"
 tar -czf "$TARBALL" -C "$STAGE" .
 
+# Update package: same tree without the STL mesh dirs (the bulk of the
+# bundle). The installer backfills meshes from the release in use.
+STAGE_UPDATE=$(mktemp -d "${TMPDIR:-/tmp}/rebotarm-update.XXXXXX")
+trap 'rm -rf "$STAGE" "$STAGE_UPDATE"' EXIT
+cp -a "$STAGE"/. "$STAGE_UPDATE"/
+find "$STAGE_UPDATE/web/dist/robots" -mindepth 2 -maxdepth 2 -type d -name meshes -exec rm -rf {} + 2>/dev/null || true
+UPDATE_TARBALL="$OUT_DIR/rebotarm-update-$RELEASE_ID.tar.gz"
+tar -czf "$UPDATE_TARBALL" -C "$STAGE_UPDATE" .
+
 echo "built: $TARBALL"
+echo "built: $UPDATE_TARBALL"
 echo "release id: $RELEASE_ID"
+ls -lh "$TARBALL" "$UPDATE_TARBALL" | sed 's/^/  /'
 echo
 echo "deploy (on a workstation with SSH access to the Jetson):"
 echo "  scp -i <key> -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o BatchMode=yes \\"

@@ -204,54 +204,68 @@ def _github_api(path: str) -> Optional[dict]:
     return None
 
 
+def _pick_asset(assets: list) -> Optional[dict]:
+    """Pick the .tar.gz asset to install.
+
+    每个 release 上传两个包：``rebotarm-release-<id>``（安装包，全量）与
+    ``rebotarm-update-<id>``（更新包，不含 STL 网格）。在线更新优先用更新包；
+    没有更新包时退回安装包（旧版本 release 只有安装包）。
+    """
+    candidates = [
+        asset
+        for asset in assets
+        if asset.get("name", "").endswith(".tar.gz") and asset.get("browser_download_url")
+    ]
+    updates = [asset for asset in candidates if "update" in asset.get("name", "").lower()]
+    return (updates or candidates or [None])[0]
+
+
 def _download_asset(
     release: dict, tmpdir: str, base: Optional[str] = None
 ) -> Optional[str]:
-    """Download the first .tar.gz asset from a release. Returns path."""
-    for asset in release.get("assets", []):
-        if not asset.get("name", "").endswith(".tar.gz"):
-            continue
-        url = asset.get("browser_download_url", "")
-        if not url:
-            continue
-        tarball = os.path.join(tmpdir, "release.tar.gz")
-        logger.info("OTA: downloading %s", asset.get("name"))
-        req = UrlRequest(url)
-        req.add_header("Accept", "application/octet-stream")
-        req.add_header("User-Agent", "rebot-server-ota")
-        total = 0
-        try:
-            with urlopen(req, timeout=300) as resp:
-                try:
-                    expected = int(resp.headers.get("Content-Length") or 0)
-                except (TypeError, ValueError):
-                    expected = 0
-                with open(tarball, "wb") as f:
-                    while True:
-                        chunk = resp.read(1024 * 1024)
-                        if not chunk:
-                            break
-                        total += len(chunk)
-                        if total > MAX_UPLOAD_BYTES:
-                            return None
-                        f.write(chunk)
-                        if base is not None:
-                            mb = total / (1024 * 1024)
-                            if expected > 0:
-                                frac = 0.02 + 0.43 * min(1.0, total / expected)
-                                msg = (
-                                    f"正在下载更新包… {mb:.0f}/"
-                                    f"{expected / (1024 * 1024):.0f} MB"
-                                )
-                            else:
-                                frac, msg = 0.02, f"正在下载更新包… {mb:.0f} MB"
-                            _write_progress(base, "downloading", msg, round(frac, 3))
-        except (URLError, OSError) as exc:
-            logger.warning("OTA: download failed: %s", exc)
-            return None
-        logger.info("OTA: downloaded %d bytes", total)
-        return tarball
-    return None
+    """Download the release asset chosen by :func:`_pick_asset`. Returns path."""
+    asset = _pick_asset(release.get("assets", []))
+    if asset is None:
+        return None
+    url = asset["browser_download_url"]
+    label = "更新包" if "update" in asset.get("name", "").lower() else "安装包"
+    tarball = os.path.join(tmpdir, "release.tar.gz")
+    logger.info("OTA: downloading %s", asset.get("name"))
+    req = UrlRequest(url)
+    req.add_header("Accept", "application/octet-stream")
+    req.add_header("User-Agent", "rebot-server-ota")
+    total = 0
+    try:
+        with urlopen(req, timeout=300) as resp:
+            try:
+                expected = int(resp.headers.get("Content-Length") or 0)
+            except (TypeError, ValueError):
+                expected = 0
+            with open(tarball, "wb") as f:
+                while True:
+                    chunk = resp.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > MAX_UPLOAD_BYTES:
+                        return None
+                    f.write(chunk)
+                    if base is not None:
+                        mb = total / (1024 * 1024)
+                        if expected > 0:
+                            frac = 0.02 + 0.43 * min(1.0, total / expected)
+                            msg = (
+                                f"正在下载{label}… {mb:.0f}/"
+                                f"{expected / (1024 * 1024):.0f} MB"
+                            )
+                        else:
+                            frac, msg = 0.02, f"正在下载{label}… {mb:.0f} MB"
+                        _write_progress(base, "downloading", msg, round(frac, 3))
+    except (URLError, OSError) as exc:
+        logger.warning("OTA: download failed: %s", exc)
+        return None
+    logger.info("OTA: downloaded %d bytes", total)
+    return tarball
 
 
 def _write_install_script(base: str, tarball: str, release_id: str, tmpdir: str) -> str:
@@ -299,6 +313,27 @@ if [ -e "$BASE/releases/$RELEASE_ID" ]; then
     rm -rf "$TMPDIR"
     exit 1
 fi
+
+# 更新包不含 STL 网格：从当前版本补齐；当前版本也没有则失败（请改用安装包）。
+# 在 mv 之前做，失败时不会留下半成品 release 目录。
+_step "extracting" "正在补齐模型资源..." 0.64
+if [ -d "$EXTRACT_DIR/web/dist/robots" ]; then
+    for model_dir in "$EXTRACT_DIR"/web/dist/robots/*/; do
+        [ -d "$model_dir" ] || continue
+        [ -d "$model_dir/meshes" ] && continue
+        model=$(basename "$model_dir")
+        prev="$BASE/current/web/dist/robots/$model/meshes"
+        if [ -d "$prev" ]; then
+            cp -a "$prev" "$model_dir/meshes"
+        else
+            _REPORTED=1
+            printf '{{"step":"error","message":"更新包缺少 %s 网格资源，请改用安装包","progress":1.0}}\\n' "$model" > "$PROGRESS"
+            rm -rf "$TMPDIR"
+            exit 1
+        fi
+    done
+fi
+
 mv "$EXTRACT_DIR" "$BASE/releases/$RELEASE_ID"
 REL="$BASE/releases/$RELEASE_ID"
 

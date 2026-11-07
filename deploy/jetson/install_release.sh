@@ -93,6 +93,26 @@ case "$RELEASE_ID" in
         ;;
 esac
 
+# Update packages omit the STL mesh directories (they are the bulk of the
+# bundle); backfill them from the release currently in use. Install packages
+# already contain meshes and skip this block.
+if [ -d "$SCRATCH/web/dist/robots" ]; then
+    for model_dir in "$SCRATCH"/web/dist/robots/*/; do
+        [ -d "$model_dir" ] || continue
+        [ -d "$model_dir/meshes" ] && continue
+        model=$(basename "$model_dir")
+        prev="$BASE/current/web/dist/robots/$model/meshes"
+        if [ ! -d "$prev" ]; then
+            echo "ERROR: this is an update package but '$model/meshes' is missing," >&2
+            echo "       and no previous release at $BASE/current provides it." >&2
+            echo "       Use the full install package (rebotarm-release-*.tar.gz) instead." >&2
+            exit 1
+        fi
+        cp -a "$prev" "$model_dir/meshes"
+        echo "meshes: backfilled $model from $(readlink "$BASE/current" || echo current)"
+    done
+fi
+
 mkdir -p "$BASE/releases" "$BASE/shared/env" "$BASE/shared/logs" "$BASE/bin"
 
 if [ -e "$BASE/releases/$RELEASE_ID" ]; then
