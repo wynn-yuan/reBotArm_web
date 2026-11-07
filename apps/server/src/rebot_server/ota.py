@@ -98,6 +98,19 @@ def _progress_file(base: str) -> str:
     return os.path.join(base, "shared", "logs", "ota-progress.json")
 
 
+def _write_progress(base: str, step: str, message: str, progress: float) -> None:
+    """Overwrite the progress file (best effort; never fails the update)."""
+    path = _progress_file(base)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            json.dump(
+                {"step": step, "message": message, "progress": progress}, f
+            )
+    except OSError:
+        logger.warning("OTA: cannot write progress file %s", path)
+
+
 def _same_build(a: str, b: str) -> bool:
     """Whether two release-id strings denote the same build.
 
@@ -185,7 +198,9 @@ def _github_api(path: str) -> Optional[dict]:
         return None
 
 
-def _download_asset(release: dict, tmpdir: str) -> Optional[str]:
+def _download_asset(
+    release: dict, tmpdir: str, base: Optional[str] = None
+) -> Optional[str]:
     """Download the first .tar.gz asset from a release. Returns path."""
     for asset in release.get("assets", []):
         if not asset.get("name", "").endswith(".tar.gz"):
@@ -201,6 +216,10 @@ def _download_asset(release: dict, tmpdir: str) -> Optional[str]:
         total = 0
         try:
             with urlopen(req, timeout=300) as resp:
+                try:
+                    expected = int(resp.headers.get("Content-Length") or 0)
+                except (TypeError, ValueError):
+                    expected = 0
                 with open(tarball, "wb") as f:
                     while True:
                         chunk = resp.read(1024 * 1024)
@@ -210,6 +229,17 @@ def _download_asset(release: dict, tmpdir: str) -> Optional[str]:
                         if total > MAX_UPLOAD_BYTES:
                             return None
                         f.write(chunk)
+                        if base is not None:
+                            mb = total / (1024 * 1024)
+                            if expected > 0:
+                                frac = 0.02 + 0.43 * min(1.0, total / expected)
+                                msg = (
+                                    f"正在下载更新包… {mb:.0f}/"
+                                    f"{expected / (1024 * 1024):.0f} MB"
+                                )
+                            else:
+                                frac, msg = 0.02, f"正在下载更新包… {mb:.0f} MB"
+                            _write_progress(base, "downloading", msg, round(frac, 3))
         except (URLError, OSError) as exc:
             logger.warning("OTA: download failed: %s", exc)
             return None
@@ -237,12 +267,12 @@ _step() {{
     echo "[OTA] $MSG"
 }}
 
-_step "downloading" "正在下载更新包..." 0.05
-_step "stopping" "正在停止服务..." 0.15
+_step "preparing" "正在准备安装..." 0.44
+_step "stopping" "正在停止服务..." 0.48
 "$BASE/bin/rebotarm-stop.sh" 2>/dev/null || true
 sleep 1
 
-_step "extracting" "正在解压更新包..." 0.25
+_step "extracting" "正在解压更新包..." 0.58
 mkdir -p "$BASE/releases"
 EXTRACT_DIR="$TMPDIR/extract"
 mkdir -p "$EXTRACT_DIR"
@@ -257,20 +287,20 @@ fi
 mv "$EXTRACT_DIR" "$BASE/releases/$RELEASE_ID"
 REL="$BASE/releases/$RELEASE_ID"
 
-_step "installing" "正在安装依赖..." 0.45
+_step "installing" "正在安装依赖..." 0.72
 "$BASE/shared/venv/bin/pip" install --disable-pip-version-check --quiet "$REL/server"
 
-_step "activating" "正在激活新版本..." 0.65
+_step "activating" "正在激活新版本..." 0.85
 install -m 755 "$REL/scripts/rebotarm-start.sh" "$BASE/bin/rebotarm-start.sh"
 install -m 755 "$REL/scripts/rebotarm-stop.sh" "$BASE/bin/rebotarm-stop.sh"
 install -m 755 "$REL/scripts/rebotarm-health.sh" "$BASE/bin/rebotarm-health.sh"
 ln -sfn "releases/$RELEASE_ID" "$BASE/current.new"
 mv -T "$BASE/current.new" "$BASE/current"
 
-_step "starting" "正在启动服务..." 0.80
+_step "starting" "正在启动服务..." 0.92
 "$BASE/bin/rebotarm-start.sh" 2>&1
 
-_step "cleanup" "正在清理..." 0.95
+_step "cleanup" "正在清理..." 0.97
 rm -rf "$TMPDIR"
 
 printf '{{"step":"done","message":"更新完成: %s","progress":1.0}}\\n' "$RELEASE_ID" > "$PROGRESS"
@@ -330,12 +360,17 @@ def get_ota_progress(request: Request) -> dict:
 
 
 @router.post("/api/ota/update-from-github")
-async def post_ota_github(
+def post_ota_github(
     request: Request,
     confirm: str = Form("false"),
     tag: str = Form(""),
 ) -> dict:
-    """Download the latest (or specified) GitHub release and install it."""
+    """Download the latest (or specified) GitHub release and install it.
+
+    Sync handler on purpose: FastAPI runs it in a worker thread, so the
+    blocking GitHub calls do not stall the event loop (the progress endpoint
+    must stay responsive during the download).
+    """
     if confirm != "true":
         return JSONResponse({"error": "requires confirm=true"}, status_code=400)
 
@@ -347,32 +382,40 @@ async def post_ota_github(
     if zero.get("status") != "inactive":
         return JSONResponse({"error": "zero-torque is active"}, status_code=409)
 
+    base = _resolve_base()
+    _write_progress(base, "downloading", "正在连接 GitHub…", 0.01)
+
     # Get release info
     path = f"releases/tags/{tag}" if tag else "releases/latest"
     release = _github_api(path)
     if release is None:
+        _write_progress(base, "error", "无法获取 GitHub release", 1.0)
         return JSONResponse({"error": "cannot fetch release from GitHub"}, status_code=502)
 
     tag_name = release.get("tag_name", "")
     if not tag_name:
+        _write_progress(base, "error", "release 缺少 tag", 1.0)
         return JSONResponse({"error": "release has no tag"}, status_code=400)
 
-    base = _resolve_base()
     if os.path.exists(os.path.join(base, "releases", tag_name)):
+        _write_progress(base, "error", f"{tag_name} 已安装", 1.0)
         return JSONResponse({"error": f"release {tag_name} already installed"}, status_code=409)
 
     tmpdir = tempfile.mkdtemp(prefix="rebotarm-ota-")
-    tarball = _download_asset(release, tmpdir)
+    tarball = _download_asset(release, tmpdir, base)
     if tarball is None:
+        _write_progress(base, "error", "下载更新包失败", 1.0)
         shutil.rmtree(tmpdir, ignore_errors=True)
         return JSONResponse({"error": "no .tar.gz asset in release"}, status_code=400)
 
     try:
         _validate_tarball(tarball)
     except ValueError as exc:
+        _write_progress(base, "error", "更新包校验失败", 1.0)
         shutil.rmtree(tmpdir, ignore_errors=True)
         return JSONResponse({"error": f"invalid tarball: {exc}"}, status_code=400)
 
+    _write_progress(base, "installing", "正在准备安装…", 0.45)
     install_script = _write_install_script(base, tarball, tag_name, tmpdir)
     subprocess.Popen(
         ["sh", install_script],
@@ -479,6 +522,7 @@ async def post_ota_update(
 
         logger.info("OTA: validated release %s (%d bytes)", release_id, total)
 
+        _write_progress(base, "installing", "正在准备安装…", 0.45)
         install_script = _write_install_script(base, tarball_path, release_id, tmpdir)
 
         # Launch in background

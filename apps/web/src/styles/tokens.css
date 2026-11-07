@@ -62,29 +62,30 @@
   --color-primary: var(--dp-color-accent);
   --color-primary-hover: #ff6a2c;
   --color-primary-active: #d94a14;
-  --color-primary-dim: rgba(241, 91, 34, 0.12);
+  /* 不透明浅色底：工业面板不做半透明玻璃效果。 */
+  --color-primary-dim: #f6d8c8;
   --color-primary-border: rgba(241, 91, 34, 0.55);
   --color-accent: var(--dp-color-accent);
 
   /* ---- 状态语义色 ---- */
-  --color-online-dim: rgba(22, 128, 61, 0.12);
+  --color-online-dim: #cfe2d6;
   --color-online-border: rgba(22, 128, 61, 0.42);
 
   --color-warning: #9a5b06;
-  --color-warning-dim: rgba(217, 119, 6, 0.14);
+  --color-warning-dim: #eadfc6;
   --color-warning-border: rgba(154, 91, 6, 0.45);
 
   --color-danger: #b3261e;
   --color-danger-hover: #8c1d17;
-  --color-danger-dim: rgba(179, 38, 30, 0.12);
+  --color-danger-dim: #e8cfcc;
   --color-danger-border: rgba(179, 38, 30, 0.42);
 
   --color-info: #0b5e80;
-  --color-info-dim: rgba(11, 94, 128, 0.12);
+  --color-info-dim: #cfdfe6;
   --color-info-border: rgba(11, 94, 128, 0.4);
 
   --color-success: #16803d;
-  --color-success-dim: rgba(22, 128, 61, 0.12);
+  --color-success-dim: #cfe2d6;
   --color-bg-inset: var(--bg-inset);
 
   /* ---- 状态徽标 / LED ---- */

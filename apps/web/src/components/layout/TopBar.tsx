@@ -47,30 +47,50 @@ export function TopBar({ onEmergencyClick }: Props) {
   const [otaProgress, setOtaProgress] = useState<OtaProgress | null>(null);
   const otaAbortRef = useRef<AbortController | null>(null);
   const otaPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const otaSubmittedAtRef = useRef(0);
 
-  // 提交更新后轮询进度
+  // 提交更新后轮询进度。下载阶段由后端线程池执行，进度接口仍可用；
+  // 服务停止/重启期间请求会失败，保留上一条进度并提示重启中。
   useEffect(() => {
     if (!otaProgress || otaProgress.step === 'done' || otaProgress.step === 'error') return;
     const poll = async () => {
       try {
-        const resp = await fetch('/api/ota/progress');
+        const resp = await fetch('/api/ota/progress', { cache: 'no-store' });
         if (!resp.ok) throw new Error('poll failed');
         const p: OtaProgress = await resp.json();
+        // 旧更新残留的 done 不能被当成这次的结果。
+        if (p.step === 'done' && Date.now() - otaSubmittedAtRef.current < 3000) return;
         setOtaProgress(p);
-        if (p.step === 'done') {
-          setOtaResult('更新完成，正在刷新…');
-          // 等待 2 秒让服务完全启动，然后刷新页面
-          setTimeout(() => { window.location.reload(); }, 2000);
-        }
       } catch {
-        // 服务正在重启，稍后重试
-        setOtaProgress((prev) => prev ? { ...prev, message: '服务重启中，等待连接…' } : null);
+        setOtaProgress((prev) => (prev ? { ...prev, message: '服务重启中，更新继续…' } : prev));
       }
     };
     otaPollRef.current = setInterval(poll, 1000);
     return () => {
       if (otaPollRef.current) clearInterval(otaPollRef.current);
+      otaPollRef.current = null;
     };
+  }, [otaProgress?.step]);
+
+  // 安装完成：显示“更新完成，重启中…”，等服务恢复后自动刷新。
+  useEffect(() => {
+    if (otaProgress?.step !== 'done') return;
+    setOtaResult('更新完成，重启中…');
+    let cancelled = false;
+    const waitForServer = async () => {
+      try {
+        const resp = await fetch('/api/health', { cache: 'no-store' });
+        if (resp.ok) {
+          if (!cancelled) setTimeout(() => { window.location.reload(); }, 1200);
+          return;
+        }
+      } catch {
+        // 服务尚未恢复，继续等待
+      }
+      if (!cancelled) setTimeout(() => { void waitForServer(); }, 1000);
+    };
+    void waitForServer();
+    return () => { cancelled = true; };
   }, [otaProgress?.step]);
 
   const checkOta = useCallback(async () => {
@@ -109,21 +129,23 @@ export function TopBar({ onEmergencyClick }: Props) {
     setOtaUpdating(true);
     setOtaError(null);
     setOtaResult(null);
+    // 立即进入进度状态：POST 要等下载完成才返回，进度轮询先跑起来。
+    otaSubmittedAtRef.current = Date.now();
+    setOtaProgress({ step: 'submitted', message: '正在提交更新…', progress: 0.01 });
     try {
       const form = new FormData();
       form.append('confirm', 'true');
       const resp = await fetch('/api/ota/update-from-github', { method: 'POST', body: form });
       const data = await resp.json();
       if (resp.ok) {
-        setOtaResult(data.message || '更新已开始');
-        // 更新已提交，隐藏"立即更新"按钮，开始轮询进度
         setOtaStatus((prev) => prev ? { ...prev, has_update: false } : null);
-        setOtaProgress({ step: 'submitted', message: '更新已提交…', progress: 0.0 });
       } else {
         setOtaError(data.error || '更新失败');
+        setOtaProgress(null);
       }
     } catch (e) {
       setOtaError('更新请求失败');
+      setOtaProgress(null);
     } finally {
       setOtaUpdating(false);
     }
@@ -267,15 +289,18 @@ export function TopBar({ onEmergencyClick }: Props) {
           {otaProgress && (
             <div className="stack stack--sm" style={{ width: '100%' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 'var(--font-sm)', color: 'var(--text-secondary)' }}>
-                <span>{otaProgress.message}</span>
-                <span>{Math.round(otaProgress.progress * 100)}%</span>
+                <span>{otaProgress.step === 'done' ? '更新完成' : otaProgress.message}</span>
+                <span>{otaProgress.step === 'done' ? 100 : Math.round(otaProgress.progress * 100)}%</span>
               </div>
-              <div style={{ width: '100%', height: 6, background: 'var(--color-bg-inset)', borderRadius: 'var(--radius-full)', overflow: 'hidden' }}>
+              <div style={{ width: '100%', height: 8, background: 'var(--bg-inset)', borderRadius: 'var(--radius-full)', overflow: 'hidden', boxShadow: 'var(--shadow-recessed)' }}>
                 <div style={{
-                  width: `${Math.round(otaProgress.progress * 100)}%`,
+                  width: `${otaProgress.step === 'done' ? 100 : Math.round(otaProgress.progress * 100)}%`,
                   height: '100%',
-                  background: otaProgress.step === 'error' ? 'var(--color-danger)' : 'var(--color-primary)',
-                  borderRadius: 'var(--radius-full)',
+                  background: otaProgress.step === 'error'
+                    ? 'var(--color-danger)'
+                    : otaProgress.step === 'done'
+                      ? 'var(--color-success)'
+                      : 'var(--color-primary)',
                   transition: 'width 0.5s ease',
                 }} />
               </div>

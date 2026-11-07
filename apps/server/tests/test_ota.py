@@ -1,12 +1,19 @@
 from __future__ import annotations
 
+import io
+import json
 import os
 import tempfile
 import unittest
 from unittest import mock
 
 import rebot_server
-from rebot_server.ota import _current_release_id, _same_build
+from rebot_server.ota import (
+    _current_release_id,
+    _download_asset,
+    _same_build,
+    _write_progress,
+)
 
 
 class SameBuildTests(unittest.TestCase):
@@ -45,6 +52,41 @@ class CurrentReleaseIdTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with mock.patch.dict(os.environ, {"REBOTARM_BASE": tmp}, clear=False):
                 self.assertEqual(_current_release_id(), str(rebot_server.__version__))
+
+
+class ProgressTests(unittest.TestCase):
+    def test_write_progress_creates_shared_logs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _write_progress(tmp, "downloading", "正在下载", 0.25)
+            path = os.path.join(tmp, "shared", "logs", "ota-progress.json")
+            with open(path) as f:
+                data = json.load(f)
+        self.assertEqual(data, {"step": "downloading", "message": "正在下载", "progress": 0.25})
+
+    def test_download_reports_progress_with_content_length(self):
+        class FakeResponse(io.BytesIO):
+            headers = {"Content-Length": str(4096)}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        release = {
+            "assets": [
+                {"name": "x.tar.gz", "browser_download_url": "https://example/x.tar.gz"}
+            ]
+        }
+        with tempfile.TemporaryDirectory() as tmp, mock.patch(
+            "rebot_server.ota.urlopen", return_value=FakeResponse(b"x" * 4096)
+        ):
+            tarball = _download_asset(release, tmp, tmp)
+            with open(os.path.join(tmp, "shared", "logs", "ota-progress.json")) as f:
+                data = json.load(f)
+        self.assertIsNotNone(tarball)
+        self.assertEqual(data["step"], "downloading")
+        self.assertAlmostEqual(data["progress"], 0.45, places=2)
 
 
 if __name__ == "__main__":
