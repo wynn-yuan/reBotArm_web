@@ -12,6 +12,7 @@ import sys
 import tempfile
 import threading
 import time
+import types
 import unittest
 from pathlib import Path
 
@@ -88,6 +89,20 @@ class ApiContractTests(unittest.TestCase):
         self.assertEqual(_SAFE_CAPABILITIES["parameter_write"], False)
         self.assertEqual(_SAFE_CAPABILITIES["active_report_write"], False)
         self.assertEqual(_SAFE_CAPABILITIES["scan"], True)
+
+    def test_damiao_arm_keeps_set_zero_but_not_persistent_gains(self):
+        from rebot_server.api import _capabilities
+
+        arm = types.SimpleNamespace(
+            motors=[types.SimpleNamespace(vendor="damiao")], gripper=None
+        )
+        state = types.SimpleNamespace(
+            capabilities={"persistent_gain_write": True, "set_zero": True},
+            active_arm=arm,
+        )
+        caps = _capabilities(state)
+        self.assertFalse(caps["persistent_gain_write"])
+        self.assertTrue(caps["set_zero"])
 
     def test_health_in_simulation_mode_never_imports_motorbridge(self):
         sys.modules.pop("motorbridge", None)

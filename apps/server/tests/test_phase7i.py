@@ -200,7 +200,8 @@ class Phase7IWriteTests(unittest.TestCase):
         stop = writes.stop_zero_torque()
         self.assertEqual(stop["status"], "inactive")
         names = [c if isinstance(c, str) else c[0] for c in scanner.calls]
-        self.assertEqual(names[:3], ["scan", "enable_all", "ensure_mode_MIT"])
+        self.assertEqual(names[:3], ["scan", "disable_all", "ensure_mode_MIT"])
+        self.assertLess(names.index("ensure_mode_MIT"), names.index("enable_all"))
         self.assertGreaterEqual(names.count("send_mit"), 1)
         self.assertEqual(names[-1], "disable_all")
         for call in scanner.calls:

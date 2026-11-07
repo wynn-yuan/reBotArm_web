@@ -41,7 +41,8 @@ FOLLOWING_ERROR_RAD = 0.5
 # of tracking (3 frames under the same error) will.
 FOLLOWING_ERROR_CONSECUTIVE_LIMIT = 3
 MAX_TRAJECTORY_SAMPLES = 250_000
-#: 历史 B601 关节限位（无 arm 时的回落；生产走 settings.arm.joint_positions）。
+#: 历史 B601 转动关节限位（无 arm 时的回落；生产走 settings.arm.joint_limits）。
+#: 老化只驱动 6 个转动关节，末端夹爪不参与。
 _LEGACY_JOINT_LIMITS = (
     (-2.8, 2.8),
     (0.0, 3.14),
@@ -49,8 +50,9 @@ _LEGACY_JOINT_LIMITS = (
     (-1.57, 1.57),
     (-1.57, 1.57),
     (-3.14, 3.14),
-    (0.0, 3.0),
 )
+#: 历史 B601 完整链路（6 转动 + 夹爪）轨迹条数，无 arm 时用于兼容旧动作。
+_LEGACY_FULL_TRAIL_COUNT = 7
 
 
 class AgingRuntimeError(RuntimeError):
@@ -95,14 +97,32 @@ class AgingRuntime:
         self._recorder = recorder
         self._gravity = gravity_model  # GravityModel | None
         arm = getattr(settings, "arm", None)
-        # 完整链路（转动关节 + 夹爪）限位/计数；无 arm 时回落历史 B601。
-        self._joint_limits = arm.joint_positions if arm is not None else _LEGACY_JOINT_LIMITS
+        # 老化只驱动转动关节（J1..J6），末端夹爪不参与（RS / DM 统一 6 轴）。
+        self._joint_limits = arm.joint_limits if arm is not None else _LEGACY_JOINT_LIMITS
         self._joint_count = len(self._joint_limits)
         self._expected_ids = (
-            arm.joint_ids if arm is not None else tuple(range(1, self._joint_count + 1))
+            arm.motor_ids if arm is not None else tuple(range(1, self._joint_count + 1))
+        )
+        # 完整链路（转动关节 + 夹爪）：旧录制动作是 7 条轨迹，接受后截断到
+        # 转动关节数，夹爪轨迹忽略。
+        self._full_joint_count = (
+            len(arm.joint_ids) if arm is not None else _LEGACY_FULL_TRAIL_COUNT
         )
         self._home_tolerance = getattr(settings, "home_tolerance_rad", HOME_TOLERANCE_RAD)
         self._home_verify_mode = getattr(settings, "home_verify_mode", "warn")
+        # 健康状态码随机型厂商变化：
+        # - RobStride: 0 = 正常（非 0 即故障）
+        # - Damiao:    0 = 失能、1 = 使能，两者都正常；>= 8 才是故障
+        # 老化运行时按关节查表，未知关节按 RobStride 语义（只认 0）兜底。
+        self._healthy_status: dict[int, tuple[int, ...]] = {}
+        if arm is not None:
+            for motor in getattr(arm, "motors", ()) or ():
+                self._healthy_status[motor.id] = (
+                    (0, 1) if motor.vendor == "damiao" else (0,)
+                )
+            gripper = getattr(arm, "gripper", None)
+            if gripper is not None:
+                self._healthy_status[gripper.id] = (0, 1) if gripper.vendor == "damiao" else (0,)
         self._lock = threading.RLock()
         self._telemetry_lock = threading.RLock()
         self._latest_frame: dict[str, Any] | None = None
@@ -624,9 +644,9 @@ class AgingRuntime:
         if frame.get("source") != "motorbridge":
             raise AgingCommunicationLost("aging requires real motorbridge telemetry")
         joints = frame.get("joints")
-        if not isinstance(joints, list) or len(joints) != self._joint_count:
+        if not isinstance(joints, list):
             raise AgingCommunicationLost(
-                f"real telemetry must contain {self._joint_count} joints"
+                f"real telemetry must contain {len(self._expected_ids)} joints"
             )
         by_id = {joint.get("id"): joint for joint in joints}
         positions: list[float] = []
@@ -638,8 +658,12 @@ class AgingRuntime:
             if not _finite(position):
                 raise AgingCommunicationLost(f"joint {expected_id} position is unavailable")
             status_code = joint.get("status_code")
-            if check_status and status_code not in (0, None):
-                raise AgingSafetyFault(f"joint {expected_id} status code {status_code}")
+            if check_status and status_code is not None:
+                healthy = self._healthy_status.get(expected_id, (0,))
+                if int(status_code) not in healthy:
+                    raise AgingSafetyFault(
+                        f"joint {expected_id} status code {status_code}"
+                    )
             positions.append(float(position))
         return positions
 
@@ -716,10 +740,13 @@ class AgingRuntime:
         if action.get("version") != "processed":
             raise AgingValidationError("aging requires a processed action")
         trails = action.get("trails")
-        if not isinstance(trails, list) or len(trails) != self._joint_count:
+        accepted_counts = {self._joint_count, self._full_joint_count}
+        if not isinstance(trails, list) or len(trails) not in accepted_counts:
             raise AgingValidationError(
                 f"processed action must contain {self._joint_count} joint trails"
             )
+        # 旧的全链路动作（如 RS 7 条轨迹）只取转动关节，夹爪轨迹忽略。
+        trails = trails[: self._joint_count]
         lengths = {len(trail) for trail in trails if isinstance(trail, list)}
         if len(lengths) != 1 or len(lengths) == 0:
             raise AgingValidationError(
@@ -741,12 +768,13 @@ class AgingRuntime:
         velocity_limits = processing.get("maxJointVelocity") if isinstance(processing, Mapping) else None
         if (
             not isinstance(velocity_limits, list)
-            or len(velocity_limits) != self._joint_count
+            or len(velocity_limits) < self._joint_count
             or any(not _finite(v) or float(v) <= 0.0 or float(v) > 10.0 for v in velocity_limits)
         ):
             raise AgingValidationError(
                 f"processed action requires {self._joint_count} valid velocity limits"
             )
+        velocity_limits = velocity_limits[: self._joint_count]
         for joint, trail in enumerate(trails):
             limit = float(velocity_limits[joint]) * 1.01
             for index in range(1, sample_count):

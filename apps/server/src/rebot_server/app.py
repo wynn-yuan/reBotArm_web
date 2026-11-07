@@ -94,7 +94,9 @@ def create_app(
         segment_seconds=settings.aging_log_segment_seconds,
         trajectory_root=settings.trajectory_dir,
     )
-    aging_recorder = AgingRecorder(aging_log_store)
+    aging_recorder = AgingRecorder(
+        aging_log_store, joint_count=len(settings.expected_ids)
+    )
 
     # Gravity compensation: only instantiate when enabled and the URDF is
     # available.  Failures are logged but never prevent server startup (fail

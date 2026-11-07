@@ -19,7 +19,7 @@ from rebot_server.models import EXPECTED_MOTOR_IDS
 
 class ChannelValidationTests(unittest.TestCase):
     def test_valid_channels_accepted(self):
-        for value in ("can0", "can1", "can12"):
+        for value in ("can0", "can1", "can12", "/dev/ttyACM0", "/dev/ttyUSB2"):
             self.assertEqual(validate_channel(value), value)
 
     def test_invalid_channels_rejected(self):
@@ -36,6 +36,8 @@ class ChannelValidationTests(unittest.TestCase):
             "can0;rm -rf /",
             "can0 && echo pwned",
             "can0/../../etc/passwd",
+            "/dev/sda1",
+            "/dev/ttyACM0/../sda1",
             None,
             1,
         )

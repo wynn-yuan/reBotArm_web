@@ -47,6 +47,8 @@ class FakeSdk:
     instances = []           # FakeController instances
     replies = {}             # motor_id -> ping reply value (any shape)
     ping_errors = {}         # motor_id -> exception raised by ping
+    registers = {}           # (motor_id, rid) -> register value (u32)
+    register_errors = {}     # (motor_id, rid) -> exception raised by read
     add_errors = {}          # motor_id -> exception raised by add_robstride_motor
     controller_error = None  # raised by Controller.__init__
     close_bus_error = None   # raised by Controller.close_bus
@@ -59,6 +61,8 @@ class FakeSdk:
         cls.instances = []
         cls.replies = {}
         cls.ping_errors = {}
+        cls.registers = {}
+        cls.register_errors = {}
         cls.add_errors = {}
         cls.controller_error = None
         cls.close_bus_error = None
@@ -99,6 +103,16 @@ class FakeMotor:
     def robstride_ping(self):
         FakeSdk.calls.append(("motor", "robstride_ping", (self.motor_id,), {}))
         return self._reply()
+
+    def get_register_u32(self, rid, timeout_ms=500):
+        # 厂商 CLI 的 Damiao 探测路径：寄存器 8 返回 ESC_ID（= 电机 ID）。
+        FakeSdk.calls.append(
+            ("motor", "get_register_u32", (self.motor_id, rid, timeout_ms), {})
+        )
+        exc = FakeSdk.register_errors.get((self.motor_id, rid))
+        if exc is not None:
+            raise exc
+        return FakeSdk.registers.get((self.motor_id, rid), self.motor_id)
 
     def _reply(self):
         exc = FakeSdk.ping_errors.get(self.motor_id)
@@ -268,6 +282,7 @@ class MotorbridgeScannerTests(unittest.TestCase):
         module.get_version = lambda: version
         module.abi_version = lambda: "fake-abi-0.5.1"
         module.Controller = controller_cls
+        module.Mode = types.SimpleNamespace(MIT=0, POS_VEL=1)
         sys.modules["motorbridge"] = module
 
     # ---- happy path: real interface shape ----
@@ -334,15 +349,178 @@ class MotorbridgeScannerTests(unittest.TestCase):
         FakeController.add_damiao_motor = add_damiao_motor
         try:
             self._install_fake_sdk()
-            outcome = MotorbridgeCanScanner(host_id=0xFD, arm=arm).scan("can0", (1,))
+            outcome = MotorbridgeCanScanner(
+                host_id=0xFD, arm=arm, allow_active_report=True, persist=True
+            ).scan("can0", (1,))
             self.assertEqual(outcome.errors, {})
             self.assertEqual(outcome.found_ids, (1,))
             self.assertEqual(
                 FakeSdk.ctrl_calls("add_damiao_motor"),
                 [("ctrl", "add_damiao_motor", (1, 0xFD, "4310"), {})],
             )
+            # Damiao 不响应 RobStride ping，按 ESC_ID 寄存器 8 判定在线。
+            self.assertEqual(
+                FakeSdk.motor_calls("get_register_u32"),
+                [("motor", "get_register_u32", (1, 8, 500), {})],
+            )
+            self.assertEqual(FakeSdk.motor_calls("robstride_ping_host_id"), [])
+            # active report 是 RobStride 专属，Damiao 绝不能被写入。
+            self.assertEqual(FakeSdk.motor_calls("robstride_set_active_report"), [])
         finally:
             del FakeController.add_damiao_motor
+
+    def test_damiao_mode_and_poll_paths_skip_robstride_only_calls(self):
+        """Damiao：MIT 模式不读 0x7005；遥测先 request_feedback 再 poll。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            arm_dir = Path(tmp) / "dm"
+            arm_dir.mkdir()
+            (arm_dir / "model.yaml").write_text(
+                yaml.safe_dump(
+                    {
+                        "name": "damiao-test",
+                        "motors": [
+                            {
+                                "id": 1,
+                                "model": "4310",
+                                "vendor": "damiao",
+                                "feedback_id": 0x11,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            arm = load_arm_by_id("dm", root=Path(tmp))
+
+        self._install_fake_sdk()
+        scanner = MotorbridgeCanScanner(arm=arm, persist=True)
+
+        class DmMotor:
+            def ensure_mode(self, mode, timeout_ms=1000):
+                FakeSdk.calls.append(("motor", "ensure_mode", (1, mode, timeout_ms), {}))
+
+            def robstride_get_param_i8(self, *args):
+                raise AssertionError("Damiao must not read RobStride run_mode 0x7005")
+
+            def request_feedback(self):
+                FakeSdk.calls.append(("motor", "request_feedback", (1,), {}))
+
+        scanner._controller = types.SimpleNamespace(
+            poll_feedback_once=lambda: FakeSdk.calls.append(
+                ("ctrl", "poll_feedback_once", (), {})
+            )
+        )
+        scanner._motors = {1: DmMotor()}
+        scanner._feedback_ids = [1]
+
+        scanner.ensure_mit_mode()
+        self.assertEqual(len(FakeSdk.motor_calls("ensure_mode")), 3)
+        scanner.poll_feedback()
+        self.assertEqual(len(FakeSdk.motor_calls("request_feedback")), 1)
+        self.assertEqual(len(FakeSdk.ctrl_calls("poll_feedback_once")), 1)
+
+    def test_damiao_mechanical_zero_disables_then_writes_without_store(self):
+        """Damiao 零位：disable_all → 健康反馈 → set_zero_position，无 store。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            arm_dir = Path(tmp) / "dm"
+            arm_dir.mkdir()
+            (arm_dir / "model.yaml").write_text(
+                yaml.safe_dump(
+                    {
+                        "name": "damiao-test",
+                        "motors": [
+                            {
+                                "id": 1,
+                                "model": "4310",
+                                "vendor": "damiao",
+                                "feedback_id": 0x11,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            arm = load_arm_by_id("dm", root=Path(tmp))
+
+        class DmMotor:
+            def __init__(self, status_code=0):
+                self.status_code = status_code
+
+            def request_feedback(self):
+                FakeSdk.calls.append(("motor", "request_feedback", (1,), {}))
+
+            def get_state(self):
+                return types.SimpleNamespace(status_code=self.status_code, pos=0.5)
+
+            def set_zero_position(self):
+                FakeSdk.calls.append(("motor", "set_zero_position", (1,), {}))
+
+        scanner = MotorbridgeCanScanner(arm=arm, persist=True)
+        scanner._controller = types.SimpleNamespace(
+            disable_all=lambda: FakeSdk.calls.append(("ctrl", "disable_all", (), {})),
+            poll_feedback_once=lambda: FakeSdk.calls.append(
+                ("ctrl", "poll_feedback_once", (), {})
+            ),
+        )
+        scanner._motors = {1: DmMotor()}
+
+        result = scanner.set_mechanical_zero()
+        self.assertEqual(result["motor_ids"], [1])
+        self.assertEqual(result["previous_positions"], {1: 0.5})
+        names = [c[1] for c in FakeSdk.calls]
+        self.assertLess(names.index("disable_all"), names.index("set_zero_position"))
+        self.assertEqual(FakeSdk.motor_calls("store_parameters"), [])
+
+        # 故障电机（status_code != 0）必须在写零之前中止。
+        FakeSdk.reset()
+        scanner._motors = {1: DmMotor(status_code=1)}
+        with self.assertRaises(RuntimeError):
+            scanner.set_mechanical_zero()
+        self.assertEqual(FakeSdk.motor_calls("set_zero_position"), [])
+
+    def test_damiao_aging_sample_requests_feedback_before_poll(self):
+        """Damiao MIT 帧不触发回报：老化每帧必须先 request_feedback 再 poll。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            arm_dir = Path(tmp) / "dm"
+            arm_dir.mkdir()
+            (arm_dir / "model.yaml").write_text(
+                yaml.safe_dump(
+                    {
+                        "name": "damiao-test",
+                        "motors": [
+                            {
+                                "id": 1,
+                                "model": "4310",
+                                "vendor": "damiao",
+                                "feedback_id": 0x11,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            arm = load_arm_by_id("dm", root=Path(tmp))
+
+        class DmMotor:
+            def send_mit(self, *args):
+                FakeSdk.calls.append(("motor", "send_mit", (1,) + args, {}))
+
+            def request_feedback(self):
+                FakeSdk.calls.append(("motor", "request_feedback", (1,), {}))
+
+        scanner = MotorbridgeCanScanner(arm=arm, persist=True)
+        scanner._controller = types.SimpleNamespace(
+            poll_feedback_once=lambda: FakeSdk.calls.append(
+                ("ctrl", "poll_feedback_once", (), {})
+            )
+        )
+        scanner._motors = {1: DmMotor()}
+        scanner._feedback_ids = [1]
+
+        scanner.send_aging_mit([0.1], [0.5])
+        names = [c[1] for c in FakeSdk.calls]
+        self.assertLess(names.index("send_mit"), names.index("request_feedback"))
+        self.assertLess(names.index("request_feedback"), names.index("poll_feedback_once"))
 
     def test_ping_runs_serially_1_to_7_with_host_id_and_timeout(self):
         self._install_fake_sdk()

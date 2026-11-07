@@ -26,6 +26,7 @@ dependencies = [
     "motorbridge==0.5.1",
     # 机型注册表读取 packages/arm-models/robots/<arm_id>/model.yaml。
     "PyYAML>=5.4,<7.0",
+    "numpy>=2.2.6",
 ]
 
 [project.optional-dependencies]

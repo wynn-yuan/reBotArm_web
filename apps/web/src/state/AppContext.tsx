@@ -228,7 +228,7 @@ function reducer(state: AppState, action: Action): AppState {
     case 'RECORD_TICK': {
       if (!state.recording || state.recording.status !== 'recording') return state;
       if (
-        action.payload.sample.length !== 7 ||
+        action.payload.sample.length !== armJointCount(state.activeArm) ||
         action.payload.sample.some((value) => !Number.isFinite(value))
       ) return state;
       const next = state.recordingBuffer.map((arr, i) => {
@@ -1444,8 +1444,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
         type: 'system',
         result: 'success',
         title: '整机机械零位已写入',
-        detail: `已按逐电机 disable → 读取 0x7019 → set_zero_position → store_parameters 完成 ${result.motor_ids.length} 个电机。`,
-        meta: { jointCount: result.motor_ids.length, adapter: state.connection.source ?? 'unknown', parameterId: '0x7019' },
+        detail: result.parameter_id == null
+          ? `已按 disable_all → 等待状态 0 → set_zero_position 完成 ${result.motor_ids.length} 个电机（Damiao）。`
+          : `已按逐电机 disable → 读取 0x7019 → set_zero_position → store_parameters 完成 ${result.motor_ids.length} 个电机。`,
+        meta: {
+          jointCount: result.motor_ids.length,
+          adapter: state.connection.source ?? 'unknown',
+          parameterId: result.parameter_id == null ? 'damiao-native' : '0x7019',
+        },
       });
     } catch (err) {
       pushLog({ type: 'system', result: 'error', title: '整机机械零位写入失败', detail: toErrorMessage(err) });

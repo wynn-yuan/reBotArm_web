@@ -10,6 +10,7 @@ import {
   type AgingRecordingStatus,
 } from '../../api/client';
 import { formatDuration } from '../../utils/format';
+import { armJointCount } from '../../types';
 import { useApp } from '../../state/AppContext';
 import { useTelemetry } from '../../state/TelemetryContext';
 import { ConfirmDialog } from '../common/ConfirmDialog';
@@ -59,9 +60,16 @@ const PHASE_LABELS: Record<string, string> = {
 export function AgingPage() {
   const { state, pushLog } = useApp();
   const { wsStatus, stale, comm } = useTelemetry();
+  const jointCount = armJointCount(state.activeArm);
+  // 老化只驱动转动关节（RS / DM 都按 6 轴），旧的全链路录制动作仍然可选。
+  const agingJointCount = state.activeArm ? state.activeArm.motorIds.length : 6;
   const processedActions = useMemo(
-    () => state.recordedActions.filter((action) => action.version === 'processed' && !action.demoOnly),
-    [state.recordedActions],
+    () => state.recordedActions.filter((action) =>
+      action.version === 'processed'
+      && !action.demoOnly
+      // 后端接受转动关节数或完整链路数（夹爪轨迹会被忽略）。
+      && (action.trails.length === agingJointCount || action.trails.length === jointCount)),
+    [state.recordedActions, agingJointCount, jointCount],
   );
   const [selectedActionId, setSelectedActionId] = useState('');
   const [loopMode, setLoopMode] = useState<'count' | 'duration' | 'infinite'>('count');
@@ -81,7 +89,9 @@ export function AgingPage() {
   const prevPhaseRef = useRef<string>('idle');
 
   useEffect(() => {
-    if (!selectedActionId && processedActions[0]) setSelectedActionId(processedActions[0].id);
+    if (!processedActions.some((action) => action.id === selectedActionId)) {
+      setSelectedActionId(processedActions[0]?.id ?? '');
+    }
   }, [processedActions, selectedActionId]);
 
   const active = ['starting', 'running', 'stopping'].includes(runtime.status);
@@ -212,7 +222,7 @@ export function AgingPage() {
               <NumberField id="aging-interval" label="间隔（秒）" value={intervalSec} min={0} step={0.5} disabled={active} onChange={setIntervalSec} />
             </div>
             <div className="field">
-              <label className="field-label" htmlFor="aging-temp-limit">温度保护 °C（可选，任一关节达此温度自动停止并归位）</label>
+              <label className="field-label" htmlFor="aging-temp-limit">温度保护 °C</label>
               <input id="aging-temp-limit" className="input" type="number" min="0" step="0.5" value={tempLimitC} placeholder="留空 = 不限制" disabled={active} onChange={(event) => setTempLimitC(event.target.value)} />
             </div>
 

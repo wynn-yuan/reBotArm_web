@@ -38,9 +38,13 @@ class AgingRecorderBusy(AgingRecorderError):
 class AgingRecorder:
     """Thread-safe lifecycle and non-blocking frame sink."""
 
-    def __init__(self, store: AgingLogStore, *, queue_capacity: int = 256) -> None:
+    def __init__(
+        self, store: AgingLogStore, *, queue_capacity: int = 256, joint_count: int = 7
+    ) -> None:
         self._store = store
         self._queue_capacity = queue_capacity
+        # 关节数随机型变化（RS 7 轴 / DM 6 轴）：每帧行数必须与之匹配。
+        self._joint_count = int(joint_count)
         self._lock = threading.RLock()
         self._queue: Optional[queue.Queue] = None
         self._thread: Optional[threading.Thread] = None
@@ -246,8 +250,7 @@ class AgingRecorder:
                 except queue.Empty:
                     pass
 
-    @staticmethod
-    def _rows_from_frame(frame: Mapping[str, Any]) -> list[dict[str, Any]]:
+    def _rows_from_frame(self, frame: Mapping[str, Any]) -> list[dict[str, Any]]:
         timestamp = frame.get("timestamp")
         sequence = frame.get("sequence")
         joints = frame.get("joints")
@@ -274,6 +277,8 @@ class AgingRecorder:
                 "status_code": joint.get("status_code"),
                 "freshness": joint.get("freshness"),
             })
-        if len(rows) != 7:
-            raise AgingRecorderError("telemetry frame must contain exactly seven joints")
+        if len(rows) != self._joint_count:
+            raise AgingRecorderError(
+                f"telemetry frame must contain exactly {self._joint_count} joints"
+            )
         return rows

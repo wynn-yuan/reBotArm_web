@@ -97,6 +97,7 @@ from typing import Any, Dict, Optional
 from .models import STATUS_CONNECTED, utc_now_iso
 from .scanners.motorbridge import (
     ADD_MOTOR_BY_VENDOR,
+    open_controller,
     resolve_motor_model,
 )
 from .sdkcheck import REQUIRED_MOTORBRIDGE_VERSION, import_verified_sdk
@@ -155,6 +156,8 @@ class ActiveReportSession:
         self._controller: Any = None
         self._motors: Dict[int, Any] = {}
         self._enabled: list = []
+        # 非 RobStride（Damiao 等）电机：无 active report，轮询前先请求反馈。
+        self._feedback_ids: list = []
         # Serializes native-handle access between the poll thread and
         # frame building (get_state).
         self._lock = threading.Lock()
@@ -189,7 +192,7 @@ class ActiveReportSession:
             )
 
         try:
-            self._controller = self._module.Controller(self._channel)
+            self._controller = open_controller(self._module, self._channel)
         except Exception as exc:
             raise TelemetrySessionError(
                 f"cannot open controller on {self._channel}: "
@@ -212,6 +215,11 @@ class ActiveReportSession:
                     )
                 self._motors[motor_id] = add_motor(motor_id, feedback_id, model)
             for motor_id in self._expected_ids:
+                vendor = resolve_motor_model(self._arm, motor_id, self._host_id)[0]
+                if vendor != "robstride":
+                    # 非 RobStride 无 active report，poll 时主动 request_feedback。
+                    self._feedback_ids.append(motor_id)
+                    continue
                 # The single authorized write — exactly once per motor.
                 self._motors[motor_id].robstride_set_active_report(True)
                 self._enabled.append(motor_id)
@@ -364,6 +372,15 @@ class ActiveReportSession:
             try:
                 with self._lock:
                     if self._controller is not None:
+                        for motor_id in self._feedback_ids:
+                            motor = self._motors.get(motor_id)
+                            request = getattr(motor, "request_feedback", None)
+                            if not callable(request):
+                                continue
+                            try:
+                                request()
+                            except Exception:
+                                pass  # 单电机失败交给 get_state 报 null
                         self._controller.poll_feedback_once()
                 self._poll_failures = 0
             except Exception as exc:
@@ -438,6 +455,7 @@ class ActiveReportSession:
                     )
         bound = bool(self._motors)
         self._motors = {}
+        self._feedback_ids = []
         controller, self._controller = self._controller, None
         if controller is None:
             return
@@ -586,16 +604,19 @@ class MotorbridgeTelemetryHub:
             )
             return
         # Gate 2: the latest completed scan must be fully connected —
-        # every expected motor ID (1..7) responded.
+        # every expected motor ID responded.
         snapshot = self._service.snapshot()
         if snapshot.get("status") != STATUS_CONNECTED:
+            expected = ", ".join(
+                str(i) for i in snapshot.get("expected_ids") or ()
+            ) or "1-7"
             await _reject(
                 websocket,
                 "telemetry_requires_connected",
                 "telemetry requires a successful full scan first: the last "
                 f"scan status is {snapshot.get('status')!r}, expected "
-                "'connected' (all motor IDs 1-7 responded). No motor was "
-                "touched.",
+                f"'connected' (all motor IDs {expected} responded). No motor "
+                "was touched.",
             )
             return
 

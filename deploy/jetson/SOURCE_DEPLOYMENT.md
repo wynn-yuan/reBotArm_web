@@ -120,7 +120,10 @@ sudo modprobe -r pcan 2>/dev/null; sudo modprobe pcan
 nano /home/<user>/rebotarm-web/shared/env/rebotarm.env
 ```
 
-Jetson + PCAN-USB `can1` 的确认配置：
+Jetson + PCAN-USB `can1` 的确认配置（DM 机型默认同样走 PCAN/SocketCAN，
+`REBOT_CAN_CHANNEL` 填同一个接口名；只有使用 Damiao 串口桥时才改成设备节点，
+例如 `/dev/ttyACM0`。其余权限开关不变，DM 也依赖
+`REBOT_ALLOW_ACTIVE_REPORT_WRITE=1` 才会启动反馈轮询与遥测）：
 
 ```dotenv
 REBOT_ADAPTER=motorbridge

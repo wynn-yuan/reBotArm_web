@@ -83,6 +83,25 @@ ADD_MOTOR_BY_VENDOR: Dict[str, str] = {
     "hightorque": "add_hightorque_motor",
 }
 
+#: Damiao 只有 ``robstride_ping_host_id`` 之外的验证方式：厂商 CLI 的
+#: ``_scan_damiao`` 读寄存器 8 (ESC_ID，即电机 ID) 判定在线。DM 电机不响应
+#: RobStride 的 ping 帧，用 ping 探测会把在线电机全部判成缺失。
+DAMIAO_ESC_ID_REGISTER = 8
+
+#: 没有专用 ping 的厂商：厂商 CLI 用 request_feedback + poll + get_state 判定。
+FEEDBACK_PROBE_VENDORS = frozenset({"myactuator", "hightorque"})
+
+
+def open_controller(module: Any, channel: str) -> Any:
+    """按 channel 选择传输：``/dev/tty*`` 走 Damiao 串口桥，其余走 SocketCAN。
+
+    与参考工程 ``reBotArm_control_py/actuator/rebotarm.py`` 的
+    ``_make_controller`` 一致。
+    """
+    if channel.startswith("/dev/tty"):
+        return module.Controller.from_dm_serial(channel, 921600)
+    return module.Controller(channel)
+
 #: 未传 ``arm`` 时的历史 B601 电机型号回落（生产代码一律传 arm=settings.arm；
 #: 测试大量用无 arm 构造，靠这个保持行为不变）。
 _LEGACY_MODELS: Dict[int, str] = {
@@ -362,10 +381,21 @@ class MotorbridgeCanScanner(CanScanner):
         self._controller: Any = None
         self._motors: Dict[int, Any] = {}
         self._active_report_ids: list[int] = []
+        # 老化只驱动转动关节（J1..J6），末端夹爪不参与。
+        self._aging_motor_ids = (
+            sorted(arm.motor_ids) if arm is not None else sorted(_LEGACY_MODELS)
+        )
+        # 非 RobStride 电机（Damiao 等）没有 active report，遥测靠
+        # request_feedback() 主动拉取。
+        self._feedback_ids: list[int] = []
         # MIT position-servo gains per motor id (J1..J6 + gripper). Used by
         # aging motion; validated to N positive finite values at config load.
         self._mit_kp = [float(value) for value in mit_kp]
         self._mit_kd = [float(value) for value in mit_kd]
+        # 增益按完整链路排序索引；夹爪 id 不一定最大，用映射取到正确一组。
+        self._gain_index = {
+            motor_id: index for index, motor_id in enumerate(sorted(self._motor_ids))
+        }
 
     def _model_for(self, motor_id: int) -> Tuple[str, str, int]:
         """Return ``(vendor, model, feedback_id)`` for *motor_id*.
@@ -424,8 +454,8 @@ class MotorbridgeCanScanner(CanScanner):
         controller: Any = None
         keep_controller = False
         try:
-            # Real signature: Controller(channel) — channel only, no host_id.
-            controller = module.Controller(channel)
+            # SocketCAN, or the Damiao serial bridge for /dev/tty* channels.
+            controller = open_controller(module, channel)
         except Exception as exc:
             return ScanOutcome(
                 fatal_message=(
@@ -456,8 +486,9 @@ class MotorbridgeCanScanner(CanScanner):
                         if self._persist:
                             motors_by_id[motor_id] = motor
                         bound = True
-                        reply = self._ping(motor)
-                        ok, reason = _validate_ping_reply(reply, motor_id)
+                        ok, reason = self._probe_motor(
+                            controller, motor, vendor, motor_id
+                        )
                         if ok:
                             found.append(motor_id)
                         else:
@@ -490,15 +521,21 @@ class MotorbridgeCanScanner(CanScanner):
                 )
             if self._persist and not errors and set(found) == set(expected_ids):
                 enabled: list[int] = []
+                feedback_ids: list[int] = []
                 try:
-                    if self._allow_active_report:
-                        for motor_id in sorted(found):
-                            motor = motors_by_id[motor_id]
-                            motor.robstride_set_active_report(True)
+                    # robstride_set_active_report 是 RobStride 专属命令；
+                    # Damiao 等厂商没有它，遥测改走 request_feedback。
+                    for motor_id in sorted(found):
+                        if self._model_for(motor_id)[0] != "robstride":
+                            feedback_ids.append(motor_id)
+                            continue
+                        if self._allow_active_report:
+                            motors_by_id[motor_id].robstride_set_active_report(True)
                             enabled.append(motor_id)
                     self._controller = controller
                     self._motors = motors_by_id
                     self._active_report_ids = enabled
+                    self._feedback_ids = feedback_ids
                     keep_controller = True
                 except Exception as exc:
                     for motor_id in enabled:
@@ -532,6 +569,7 @@ class MotorbridgeCanScanner(CanScanner):
             except Exception as exc:
                 logger.warning("active report cleanup failed for %s: %s", motor_id, _sanitize(exc))
         self._active_report_ids = []
+        self._feedback_ids = []
         self._controller = None
         self._motors = {}
         self._release_controller_best_effort(controller, bool(motors), motors)
@@ -560,19 +598,46 @@ class MotorbridgeCanScanner(CanScanner):
         load.  It is re-enabled after aging finishes.
         """
         for motor_id in sorted(self._motors):
+            if self._model_for(motor_id)[0] != "robstride":
+                continue  # active report 是 RobStride 专属命令
             motor = self._motors[motor_id]
             call = getattr(motor, "robstride_set_active_report", None)
             if not callable(call):
                 raise RuntimeError("motorbridge SDK lacks robstride_set_active_report")
             call(enabled)
-        self._active_report_ids = list(self._motors) if enabled else []
+        self._active_report_ids = [
+            motor_id
+            for motor_id in sorted(self._motors)
+            if self._model_for(motor_id)[0] == "robstride"
+        ] if enabled else []
 
     def poll_feedback(self) -> None:
-        if self._controller is not None:
-            call = getattr(self._controller, "poll_feedback_once", None)
-            if not callable(call):
-                raise RuntimeError("motorbridge SDK lacks poll_feedback_once")
-            call()
+        """拉取一次反馈：非 RobStride 电机先主动 request_feedback。
+
+        Damiao 没有 active report 流，状态缓存只能由显式请求 + poll 更新
+        （与厂商 CLI 的 ``_scan_damiao``/参考工程 ``_request_feedback`` 一致）。
+        """
+        if self._controller is None:
+            return
+        for motor_id in list(self._feedback_ids):
+            motor = self._motors.get(motor_id)
+            request = getattr(motor, "request_feedback", None)
+            if not callable(request):
+                continue
+            try:
+                request()
+            except Exception as exc:
+                # 单个电机的请求失败不影响其它电机；null 数据由遥测层表示。
+                logger.debug(
+                    "request_feedback failed for motor %s: %s: %s",
+                    motor_id,
+                    type(exc).__name__,
+                    _sanitize(exc),
+                )
+        call = getattr(self._controller, "poll_feedback_once", None)
+        if not callable(call):
+            raise RuntimeError("motorbridge SDK lacks poll_feedback_once")
+        call()
 
     def telemetry_motors(self) -> Dict[int, Any]:
         return dict(self._motors)
@@ -585,6 +650,10 @@ class MotorbridgeCanScanner(CanScanner):
         ``run_mode`` (parameter 0x7005) reads 0 (= MIT) before reporting
         success. Without that confirmation the motor may stay in its previous
         mode and the MIT servo never engages (joints stay soft).
+
+        ``0x7005`` is a RobStride parameter register; Damiao has no such
+        parameter and is confirmed only by ``ensure_mode`` not raising
+        (reference ``0x01damiao_test.py`` does exactly that).
         """
         if self._controller is None or set(self._motors) != set(self._motor_ids):
             raise RuntimeError("controller is not connected to all motors")
@@ -601,6 +670,8 @@ class MotorbridgeCanScanner(CanScanner):
             for _ in range(3):
                 call(mit, 1000)
                 time.sleep(0.02)
+            if self._model_for(motor_id)[0] != "robstride":
+                continue
             # Mandatory mode confirmation: read run_mode (0x7005); it must read
             # 0 (= MIT). Without this the motor may report success while still
             # in its previous mode and the MIT servo never engages.
@@ -643,28 +714,31 @@ class MotorbridgeCanScanner(CanScanner):
     def send_aging_mit(
         self, positions: Sequence[float], gravity_torque: Sequence[float] | None = None
     ) -> None:
-        """Send one synchronized seven-joint MIT position-servo sample.
+        """Send one synchronized MIT position-servo sample to the rotational joints.
 
-        Mirrors the reference control stack (reBotArm_control example
-        ``3_mit_control.py``): MIT mode with the configured per-joint kp/kd,
-        velocity feedforward 0 and torque feedforward from *gravity_torque*
-        (when provided, otherwise 0). After sending, poll feedback once UNDER
-        THE SAME BUS LOCK so the motor state cache is updated immediately —
-        the telemetry emitter can then read the fresh state WITHOUT acquiring
-        the bus lock again, eliminating the 100 Hz lock contention that causes
-        stutter.
+        Aging ignores the end gripper (RS and DM are both driven as 6 axes),
+        so *positions* covers ``self._aging_motor_ids`` only; the gripper gets
+        no MIT frame and stays disabled. Mirrors the reference control stack
+        (reBotArm_control example ``3_mit_control.py``): MIT mode with the
+        configured per-joint kp/kd, velocity feedforward 0 and torque
+        feedforward from *gravity_torque* (when provided, otherwise 0). After
+        sending, poll feedback once UNDER THE SAME BUS LOCK so the motor state
+        cache is updated immediately — the telemetry emitter can then read the
+        fresh state WITHOUT acquiring the bus lock again, eliminating the
+        100 Hz lock contention that causes stutter.
         """
         if self._controller is None or set(self._motors) != set(self._motor_ids):
             raise RuntimeError("controller is not connected to all motors")
-        if len(positions) != len(self._motor_ids):
+        if len(positions) != len(self._aging_motor_ids):
             raise ValueError(
-                f"aging command requires exactly {len(self._motor_ids)} positions"
+                f"aging command requires exactly {len(self._aging_motor_ids)} positions"
             )
-        for index, motor_id in enumerate(sorted(self._motor_ids)):
+        for index, motor_id in enumerate(self._aging_motor_ids):
             motor = self._motors[motor_id]
             call = getattr(motor, "send_mit", None)
             if not callable(call):
                 raise RuntimeError("motorbridge SDK lacks Motor.send_mit")
+            gain = self._gain_index[motor_id]
             tau_ff = (
                 float(gravity_torque[index])
                 if gravity_torque is not None
@@ -673,14 +747,25 @@ class MotorbridgeCanScanner(CanScanner):
             call(
                 float(positions[index]),
                 0.0,
-                float(self._mit_kp[index]),
-                float(self._mit_kd[index]),
+                float(self._mit_kp[gain]),
+                float(self._mit_kd[gain]),
                 tau_ff,
             )
         # Poll feedback once while the bus lock is still held: the motor
         # replies to every MIT frame with a status frame, so the SDK cache
         # is updated immediately.  The telemetry emitter can then build its
         # next frame from this fresh cache without acquiring the bus lock.
+        # Damiao does NOT reply to MIT frames (reference rebotarm.py calls
+        # request_feedback() in every control cycle), so request explicitly
+        # first — otherwise the cached state freezes at the pre-aging pose
+        # and the following-error/home checks run on stale data.
+        for motor_id in list(self._feedback_ids):
+            request = getattr(self._motors.get(motor_id), "request_feedback", None)
+            if callable(request):
+                try:
+                    request()
+                except Exception:
+                    pass
         poll = getattr(self._controller, "poll_feedback_once", None)
         if callable(poll):
             poll()
@@ -746,14 +831,26 @@ class MotorbridgeCanScanner(CanScanner):
         return {"motor_ids": applied, "parameter_ids": dict(PERSISTENT_GAIN_PARAM_IDS)}
 
     def set_mechanical_zero(self) -> Dict[str, Any]:
-        """Apply the verified rs_tools.py per-motor mechanical-zero flow.
+        """Apply the verified per-motor mechanical-zero flow.
 
-        The operation is intentionally not a generic parameter write:
-        ``disable`` → read ``0x7019`` → ``set_zero_position`` →
-        ``store_parameters`` for each connected motor, in fixed ID order.
+        RobStride (rs_tools.py): ``disable`` → read ``0x7019`` →
+        ``set_zero_position`` → ``store_parameters`` per motor.
+
+        Damiao (reference ``rebotarm.set_zero``): ``disable_all`` → poll fresh
+        feedback until ``status_code == 0`` → ``set_zero_position`` per motor;
+        DM persists the zero point itself, so no ``store_parameters`` call.
         """
         if self._controller is None or set(self._motors) != set(self._motor_ids):
             raise RuntimeError("controller is not connected to all motors")
+        vendors = {self._model_for(motor_id)[0] for motor_id in self._motor_ids}
+        if len(vendors) != 1 or not vendors <= {"robstride", "damiao"}:
+            raise RuntimeError(
+                f"mixed/unsupported motor vendors {sorted(vendors)}: "
+                "mechanical zero requires an all-RobStride or all-Damiao arm"
+            )
+        if vendors == {"damiao"}:
+            return self._set_damiao_zero()
+
         self._assert_all_robstride()
         for motor_id in sorted(self._motor_ids):
             motor = self._motors[motor_id]
@@ -785,7 +882,98 @@ class MotorbridgeCanScanner(CanScanner):
             "previous_positions": previous_positions,
         }
 
+    def _set_damiao_zero(self) -> Dict[str, Any]:
+        """Damiao zero flow from the reference ``rebotarm.set_zero``.
+
+        ``disable_all`` first (the arm is limp for the whole sequence), then
+        require a fresh healthy feedback frame per motor *before* writing any
+        zero, so a faulted motor aborts the operation with nothing written.
+        """
+        for motor_id in sorted(self._motor_ids):
+            motor = self._motors[motor_id]
+            for name in ("request_feedback", "get_state", "set_zero_position"):
+                if not callable(getattr(motor, name, None)):
+                    raise RuntimeError(f"motorbridge SDK lacks Motor.{name}")
+        poll = getattr(self._controller, "poll_feedback_once", None)
+        if not callable(poll):
+            raise RuntimeError("motorbridge SDK lacks poll_feedback_once")
+
+        self.disable_all()
+        time.sleep(0.3)
+
+        states: Dict[int, Any] = {}
+        for motor_id in sorted(self._motor_ids):
+            motor = self._motors[motor_id]
+            state = None
+            for _ in range(40):  # <= 2 s per motor
+                motor.request_feedback()
+                poll()
+                state = motor.get_state()
+                if state is not None and state.status_code == 0:
+                    break
+                time.sleep(0.05)
+            if state is None or state.status_code != 0:
+                raise RuntimeError(
+                    f"motor {motor_id}: no healthy Damiao feedback "
+                    "(status_code != 0); zero not written"
+                )
+            states[motor_id] = state
+
+        for motor_id in sorted(self._motor_ids):
+            self._motors[motor_id].set_zero_position()
+        return {
+            "motor_ids": sorted(self._motor_ids),
+            "parameter_id": None,
+            "previous_positions": {
+                motor_id: float(state.pos) for motor_id, state in states.items()
+            },
+        }
+
     # ---- SDK interaction seams (verified against motorbridge 0.5.1) ----
+
+    def _probe_motor(
+        self, controller: Any, motor: Any, vendor: str, motor_id: int
+    ) -> Tuple[bool, str]:
+        """Probe one motor with its vendor's verified read-only method.
+
+        RobStride has a timed ping; Damiao does not answer it and is verified
+        by reading ESC_ID register 8 (vendor ``_scan_damiao``); myactuator /
+        hightorque are verified by request_feedback + poll + get_state
+        (vendor ``_scan_*``).
+        """
+        if vendor == "damiao":
+            read = getattr(motor, "get_register_u32", None)
+            if not callable(read):
+                raise _IncompatibleSdkError(
+                    "motorbridge SDK incompatible: motor object lacks "
+                    "get_register_u32(rid, timeout_ms) required for Damiao "
+                    "scan (ESC_ID register 8)"
+                )
+            esc_id = read(DAMIAO_ESC_ID_REGISTER, self._ping_timeout_ms)
+            if esc_id != motor_id:
+                return False, (
+                    "unexpected Damiao ESC_ID in register 8: got "
+                    f"{esc_id!r}, expected {motor_id}"
+                )
+            return True, ""
+        if vendor in FEEDBACK_PROBE_VENDORS:
+            request = getattr(motor, "request_feedback", None)
+            poll = getattr(controller, "poll_feedback_once", None)
+            get_state = getattr(motor, "get_state", None)
+            if not all(callable(fn) for fn in (request, poll, get_state)):
+                raise _IncompatibleSdkError(
+                    "motorbridge SDK incompatible: feedback probe requires "
+                    "request_feedback/poll_feedback_once/get_state"
+                )
+            request()
+            for _ in range(20):
+                poll()
+                if get_state() is not None:
+                    return True, ""
+                time.sleep(0.008)
+            return False, "no feedback"
+        reply = self._ping(motor)
+        return _validate_ping_reply(reply, motor_id)
 
     def _ping(self, motor: Any) -> Any:
         """Ping one motor via the ONLY permitted SDK call.

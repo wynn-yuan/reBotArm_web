@@ -1,8 +1,8 @@
-# reBot DevArm DM 机型配置（Damiao 电机，数值对齐参考工程 reBotArm_control_py/config/rebotarm_dm.yaml）
+# reBot DM B601 机型配置（Damiao 电机，数值对齐参考工程 reBotArm_control_py/config/rebotarm_dm.yaml）
 # vendor: damiao ｜ dm-serial 桥：每关节独立 feedback_id（0x11..0x16）｜ URDF: reBot-DevArm_fixend
 # 末端为 fixed end_joint（无活动夹爪），故不注册 gripper（gripper: null）。
 arm_id: rebot-devarm-dm
-name: reBot DevArm DM
+name: reBot DM B601
 vendor: damiao
 host_id: 0
 root_link: link1

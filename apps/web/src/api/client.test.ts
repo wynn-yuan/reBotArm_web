@@ -222,8 +222,15 @@ describe('aging log API', () => {
       version: 'processed' as const,
       rawActionId: 'raw-1',
     };
+    const validDm = {
+      id: 'processed-dm', name: '动作DM', createdAt: 1, durationMs: 40,
+      sampleCount: 2, samplingHz: 50, jointCount: 6,
+      trails: Array.from({ length: 6 }, () => [0, 0.01]),
+      version: 'processed' as const,
+      rawActionId: 'raw-dm',
+    };
     const fetchFn = vi.fn().mockResolvedValue(
-      jsonResponse({ actions: [valid, { id: 'bad', trails: 'nope' }, null] }),
+      jsonResponse({ actions: [valid, validDm, { id: 'bad', trails: 'nope' }, null] }),
     );
     stubFetch(fetchFn);
     const actions = await getAgingActions();
@@ -231,7 +238,7 @@ describe('aging log API', () => {
       `${API_BASE_URL}/aging/actions`,
       expect.objectContaining({ method: 'GET' }),
     );
-    expect(actions).toEqual([valid]);
+    expect(actions).toEqual([valid, validDm]);
   });
 
   it('saveAgingAction POST 动作到后端动作库', async () => {

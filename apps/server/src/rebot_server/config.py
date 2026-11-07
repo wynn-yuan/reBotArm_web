@@ -29,10 +29,11 @@ ADAPTER_SIMULATION = "simulation"
 ADAPTER_MOTORBRIDGE = "motorbridge"
 _SUPPORTED_ADAPTERS = (ADAPTER_SIMULATION, ADAPTER_MOTORBRIDGE)
 
-#: Only ``can<number>`` is accepted (e.g. ``can0``). Anything else —
-#: including ``vcan0``, ``slcan0``, whitespace, or shell metacharacters —
-#: is rejected.
-CHANNEL_PATTERN = re.compile(r"^can[0-9]+$")
+#: ``can<number>`` (SocketCAN, RS) or ``/dev/ttyACM<number>`` /
+#: ``/dev/ttyUSB<number>`` (Damiao serial bridge). Anything else — including
+#: ``vcan0``, ``slcan0``, whitespace, shell metacharacters or arbitrary
+#: ``/dev/`` paths — is rejected.
+CHANNEL_PATTERN = re.compile(r"^(can[0-9]+|/dev/tty(?:ACM|USB)[0-9]+)$")
 
 DEFAULT_CHANNEL = "can0"
 DEFAULT_HOST_ID = 0xFD  # robstride host / feedback ID
@@ -127,10 +128,11 @@ class ConfigError(ValueError):
 
 
 def validate_channel(channel: object) -> str:
-    """Return *channel* if it is a safe SocketCAN name, else raise ConfigError."""
+    """Return *channel* if it is a safe SocketCAN name / serial device, else raise ConfigError."""
     if not isinstance(channel, str) or CHANNEL_PATTERN.fullmatch(channel) is None:
         raise ConfigError(
-            "invalid CAN channel %r: only 'can<number>' is allowed (e.g. can0)"
+            "invalid channel %r: only 'can<number>' or '/dev/ttyACM<number>' / "
+            "'/dev/ttyUSB<number>' is allowed (e.g. can0, /dev/ttyACM0)"
             % (channel,)
         )
     return channel

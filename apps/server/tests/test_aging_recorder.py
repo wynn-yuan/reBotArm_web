@@ -86,6 +86,36 @@ class AgingRecorderTests(unittest.TestCase):
         with self.assertRaises(Exception):
             self.recorder.start()
 
+    def test_joint_count_follows_arm_model(self):
+        """DM 6 轴：6 关节帧正常写入，关节数不符则 fail closed。"""
+        root = Path(tempfile.mkdtemp(prefix="rebot-aging-recorder-dm-"))
+        recorder = AgingRecorder(
+            AgingLogStore(root, min_free_bytes=0, segment_seconds=300),
+            joint_count=6,
+        )
+        try:
+            recorder.start()
+            dm_frame = frame()
+            dm_frame["joints"] = dm_frame["joints"][:6]
+            recorder.accept_frame(dm_frame)
+            deadline = time.monotonic() + 2
+            while recorder.status()["frames_written"] < 1 and time.monotonic() < deadline:
+                time.sleep(0.01)
+            stopped = recorder.stop()
+            self.assertEqual(stopped["status"], "inactive")
+            self.assertEqual(stopped["rows_written"], 6)
+
+            recorder.start()
+            recorder.accept_frame(frame())  # 7 关节，与 6 轴机型不符
+            deadline = time.monotonic() + 2
+            while recorder.status()["status"] == "recording" and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(recorder.status()["status"], "error")
+            self.assertIn("6 joints", recorder.status()["error"])
+        finally:
+            recorder.shutdown()
+            shutil.rmtree(root, ignore_errors=True)
+
 
 if __name__ == "__main__":
     unittest.main()

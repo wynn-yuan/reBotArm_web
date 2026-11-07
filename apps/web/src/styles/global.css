@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Host+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
 @import './tokens.css';
 @import './components.css';
 
@@ -15,31 +15,27 @@ body,
 }
 
 body {
-  background: var(--bg-base);
+  background: #b3babd;
   color: var(--text-primary);
   font-family: var(--font-base);
-  font-size: var(--font-md);
+  font-size: 14px;
   line-height: var(--leading-normal);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeLegibility;
-  /* 左上往右下扩散的漫射灯光：给整块"塑料底盘"一个光源热点 */
-  background-image: radial-gradient(
-    ellipse 90% 70% at 12% -5%,
-    rgba(255, 255, 255, 0.55),
-    rgba(255, 255, 255, 0) 55%
-  );
+  /* 左上光源：底盘顶端略亮 */
+  background-image: linear-gradient(160deg, #c3c9cb 0%, #b3babd 55%, #aeb5b8 100%);
   background-attachment: fixed;
 }
 
-/* 塑料微纹：整页叠加 SVG 分形噪声，模拟注塑表面的微观瑕疵 */
+/* 机壳微纹：极低不透明度的细噪声，只解释材质，不干扰阅读 */
 body::after {
   content: '';
   position: fixed;
   inset: 0;
   z-index: 2147483647;
   pointer-events: none;
-  opacity: 0.035;
+  opacity: 0.018;
   mix-blend-mode: multiply;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='240'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
 }
@@ -78,6 +74,7 @@ h6 {
   margin: 0;
   font-weight: 700;
   line-height: var(--leading-tight);
+  letter-spacing: -0.015em;
   color: var(--text-primary);
 }
 
@@ -92,7 +89,7 @@ ol {
   list-style: none;
 }
 
-/* 滚动条：深灰金属滑块 */
+/* 滚动条：机加工滑轨 */
 ::-webkit-scrollbar {
   width: 10px;
   height: 10px;
@@ -103,25 +100,25 @@ ol {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: linear-gradient(90deg, #a3b1c6, #b7c3d4);
+  background: #97a1a5;
   border-radius: 5px;
   border: 2px solid var(--bg-base);
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #8fa0b5;
+  background: #828d91;
 }
 
-/* 焦点环：安全橙背光，清晰可见，符合无障碍要求 */
+/* 焦点环：橙色背光，边框外侧可见 */
 :focus-visible {
-  outline: 2px solid var(--border-focus);
+  outline: 2px solid var(--dp-color-accent);
   outline-offset: 2px;
   border-radius: var(--radius-sm);
 }
 
 /* 选区 */
 ::selection {
-  background: var(--color-primary-dim);
+  background: rgba(241, 91, 34, 0.28);
   color: var(--text-primary);
 }
 
@@ -130,4 +127,21 @@ ol {
   min-height: 100%;
   display: flex;
   flex-direction: column;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  .btn:hover:not(:disabled),
+  .card:hover,
+  .metric-card:hover {
+    transform: none !important;
+  }
 }

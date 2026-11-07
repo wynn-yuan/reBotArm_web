@@ -10,7 +10,6 @@ import { EmptyState } from '../common/EmptyState';
 import { formatDeg, formatIdRange, formatNumber } from '../../utils/format';
 import {
   GRIPPER_CALIBRATION_NOTE,
-  GRIPPER_CALIBRATION_STEPS,
   armConfigFromModel,
   armJointViews,
   computeRobotJointWrites,
@@ -172,15 +171,6 @@ export function MonitorPage() {
         </div>
       )}
 
-      {/* 映射说明：恒等变换有参考控制栈依据；零位无法远程确认，不假装已标定 */}
-      <div className="param-notice param-notice--info" role="note">
-        <AlertTriangle size={16} style={{ flexShrink: 0, marginTop: 2 }} />
-        <span>
-          J1–J6 映射：urdf = raw × 1 × (+1) + 0（恒等变换，依据：参考控制栈将电机弧度反馈直接用于同一
-          URDF 的正/逆运动学）。机械零位取决于现场 set_zero 操作，遥测无法远程确认，故零位按「未验证」标注。
-        </span>
-      </div>
-
       {/* 超出 URDF 限位告警（真实值 + 告警，绝不静默伪造正常值） */}
       {outIds.length > 0 && (
         <div className="param-notice param-notice--warning" role="alert">
@@ -192,8 +182,8 @@ export function MonitorPage() {
         </div>
       )}
 
-      {/* 夹爪（ID 7）待标定告警 */}
-      {joints.length > 0 && (
+      {/* 夹爪（ID 7）待标定告警：仅带夹爪机型显示 */}
+      {joints.length > 0 && gripperId !== null && (
         <div className="param-notice param-notice--warning" role="status">
           <AlertTriangle size={16} style={{ flexShrink: 0, marginTop: 2 }} />
           <span>{GRIPPER_CALIBRATION_NOTE}</span>
@@ -351,34 +341,23 @@ export function MonitorPage() {
         </div>
       </div>
 
-      {/* 夹爪手动标定步骤（只读控制台；步骤必须由用户在实机执行，Claude/前端不操作机械臂） */}
-      <div className="card">
-        <div className="card-header">
-          <div>
-            <div className="card-title">夹爪映射待标定 · 手动标定步骤</div>
-            <div className="card-subtitle">
-              缺失依据：电机角度→开度传动比、左右手指方向、机械零位、最大开度实测。
-              当前仅展示 ID 7 原始弧度（当前值：
-              {gripperJoint && gripperJoint.position !== null
-                ? `${formatNumber(gripperJoint.position, 3)} rad`
-                : '—'}
-              ），夹爪模型动画已暂停。
+      {gripperId !== null && (
+        <div className="card">
+          <div className="card-header">
+            <div className="card-title">夹爪映射待标定</div>
+          </div>
+          <div className="card-body">
+            <div className="row row--wrap" style={{ gap: 'var(--space-4)' }}>
+              <span className="tertiary" style={{ fontSize: 'var(--font-xs)' }}>
+                ID {gripperId} 原始位置：
+                {gripperJoint && gripperJoint.position !== null
+                  ? `${formatNumber(gripperJoint.position, 3)} rad`
+                  : '—'}
+              </span>
             </div>
           </div>
         </div>
-        <div className="card-body">
-          <ol className="stack" style={{ margin: 0, paddingLeft: 'var(--space-4)' }}>
-            {GRIPPER_CALIBRATION_STEPS.map((step) => (
-              <li key={step} className="tertiary" style={{ fontSize: 'var(--font-sm)' }}>
-                {step}
-              </li>
-            ))}
-            <li className="tertiary" style={{ fontSize: 'var(--font-sm)', fontWeight: 600 }}>
-              注意：以上步骤均需人工在实机上完成；本控制台为只读遥测，不会下发任何电机运动指令。
-            </li>
-          </ol>
-        </div>
-      </div>
+      )}
     </div>
   );
 }

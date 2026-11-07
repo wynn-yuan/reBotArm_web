@@ -450,7 +450,7 @@ export interface MechanicalZeroResult {
   operation: 'set_mechanical_zero';
   channel: string;
   motor_ids: number[];
-  parameter_id: number;
+  parameter_id: number | null;
   previous_positions: Record<string, number | null>;
   completed_at: string;
 }
@@ -515,7 +515,8 @@ function isProcessedAction(raw: unknown): raw is RecordedAction {
   return typeof r.id === 'string'
     && typeof r.name === 'string'
     && Array.isArray(r.trails)
-    && r.trails.length === 7
+    // 关节数随机型变化（RS 7 轴 / DM 6 轴），后端执行时会再按机型校验。
+    && r.trails.length > 0
     && r.trails.every(
       (trail) => Array.isArray(trail) && trail.every((value) => typeof value === 'number' && Number.isFinite(value)),
     );

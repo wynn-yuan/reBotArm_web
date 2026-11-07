@@ -185,18 +185,48 @@ class AgingActionRequest(BaseModel):
     action: Dict[str, Any] = Field(default_factory=dict)
 
 
+def _robstride_only_arm(arm) -> bool:
+    """True when every motor of *arm* is RobStride (no arm => legacy RS)."""
+    if arm is None:
+        return True
+    vendors = {motor.vendor for motor in arm.motors}
+    if arm.gripper is not None:
+        vendors.add(arm.gripper.vendor)
+    return vendors <= {"robstride"}
+
+
+def _set_zero_capable_arm(arm) -> bool:
+    """True when every motor has a verified mechanical-zero flow."""
+    if arm is None:
+        return True
+    vendors = {motor.vendor for motor in arm.motors}
+    if arm.gripper is not None:
+        vendors.add(arm.gripper.vendor)
+    return vendors <= {"robstride", "damiao"}
+
+
+def _capabilities(state) -> dict:
+    """Startup capabilities with vendor-specific features turned off.
+
+    Persistent gains are RobStride-only; mechanical zero is implemented for
+    RobStride and Damiao, so only other vendors lose it here.
+    """
+    caps = dict(getattr(state, "capabilities", _SAFE_CAPABILITIES))
+    if not _robstride_only_arm(getattr(state, "active_arm", None)):
+        caps["persistent_gain_write"] = False
+    if not _set_zero_capable_arm(getattr(state, "active_arm", None)):
+        caps["set_zero"] = False
+    return caps
+
+
 def _with_capabilities(request: Request, snapshot: dict) -> dict:
-    """Attach the startup-established capabilities to a connection snapshot.
+    """Attach the capabilities to a connection snapshot.
 
     Falls back to ``_SAFE_CAPABILITIES`` (fail closed) when the app state
     lacks them — identical semantics to ``get_health``. Never mutates the
     service snapshot.
     """
-    state = request.app.state
-    return {
-        **snapshot,
-        "capabilities": getattr(state, "capabilities", _SAFE_CAPABILITIES),
-    }
+    return {**snapshot, "capabilities": _capabilities(request.app.state)}
 
 
 def _aging_store(request: Request):
@@ -448,7 +478,7 @@ def get_health(request: Request) -> dict:
             state, "motorbridge_abi_version", None
         ),
         # Established at startup (app.py); fail-closed defaults if absent.
-        "capabilities": getattr(state, "capabilities", _SAFE_CAPABILITIES),
+        "capabilities": _capabilities(state),
         "time": utc_now_iso(),
     }
 
@@ -771,7 +801,7 @@ def post_persistent_gains(request: Request, body: PersistentGainsRequest):
 
 @router.post("/api/robot/parameters/zero")
 def post_mechanical_zero(request: Request, body: ManualActionRequest):
-    """Apply the user-confirmed rs_tools.py mechanical-zero sequence."""
+    """Apply the user-confirmed mechanical-zero sequence for the active arm."""
     if body.confirm is not True:
         return JSONResponse(
             status_code=400,

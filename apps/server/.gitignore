@@ -13,3 +13,4 @@ venv/
 # Test caches
 .pytest_cache/
 .coverage
+planning/

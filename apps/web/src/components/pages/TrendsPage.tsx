@@ -193,12 +193,14 @@ export function TrendsPage() {
                 desc="收到遥测帧后自动开始记录并绘制曲线，无需手动开始。"
               />
             ) : (
-              <JointChart
-                series={series}
-                metric={metric}
-                windowSize={windowSize}
-                onClear={clearTrend}
-              />
+              <div className="screen-well">
+                <JointChart
+                  series={series}
+                  metric={metric}
+                  windowSize={windowSize}
+                  onClear={clearTrend}
+                />
+              </div>
             )}
           </div>
         </div>

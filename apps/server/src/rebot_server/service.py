@@ -256,7 +256,7 @@ class ScanService:
             self._release_if_pending()
 
     def run_set_zero(self) -> Dict[str, Any]:
-        """Run the user-confirmed rs_tools.py mechanical-zero flow."""
+        """Run the user-confirmed per-vendor mechanical-zero flow (RS / Damiao)."""
         self.try_acquire_bus("write")
         try:
             method = getattr(self._scanner, "set_mechanical_zero", None)
@@ -308,7 +308,8 @@ class ScanService:
                 snapshot.get("found_ids", ())
             ) != set(self._expected_ids):
                 raise ServiceOperationError(
-                    "aging motion requires a complete scan of motor IDs 1..7"
+                    "aging motion requires a complete scan of motor IDs "
+                    f"{_format_ids(self._expected_ids)}"
                 )
             if self.zero_torque_status()["status"] != "inactive":
                 try:
@@ -454,7 +455,8 @@ class ScanService:
                     self._expected_ids
                 ):
                     raise ServiceOperationError(
-                        "zero-torque mode requires a complete scan of motor IDs 1..7"
+                        "zero-torque mode requires a complete scan of motor IDs "
+                        f"{_format_ids(self._expected_ids)}"
                     )
                 self._zero_status.update(
                     status="starting", updated_at=utc_now_iso(), error=None
@@ -477,10 +479,17 @@ class ScanService:
             try:
                 enable = getattr(self._scanner, "enable_all", None)
                 ensure = getattr(self._scanner, "ensure_mit_mode", None)
-                if not callable(enable) or not callable(ensure):
+                disable = getattr(self._scanner, "disable_all", None)
+                if not callable(enable) or not callable(ensure) or not callable(disable):
                     raise ServiceOperationError("zero-torque SDK owner is not available")
-                enable()
+                # Same order as the aging preflight (and the reference
+                # mode_mit() -> enable_all() flow): disable -> MIT mode ->
+                # enable. Switching mode while enabled can leave Damiao in
+                # its previous mode, and the zero MIT frames would then not
+                # float the arm.
+                disable()
                 ensure()
+                enable()
                 with self._zero_state_lock:
                     self._zero_status.update(
                         status="active",
