@@ -668,6 +668,8 @@ export interface AppContextValue {
   recordTick: (sample: number[]) => void;
   recordCountdownDone: () => void;
   saveProcessedAction: (action: RecordedAction) => void;
+  /** 新增动作（机型转换等）：processed 版本同时持久化到后端动作库。 */
+  addAction: (action: RecordedAction) => void;
   startPlayback: (actionId: string, speedMultiplier?: number) => void;
   startAging: (cfg: AgingConfig) => void;
   agingTick: (loopsCompleted: number) => void;
@@ -1060,6 +1062,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
           trails: recordingBuffer.map((trail) => [...trail]),
           timedSamples,
           version: 'raw',
+          armId: state.activeArm?.armId,
+          armName: state.activeArm?.name,
         };
         dispatch({ type: 'ADD_ACTION', action: newAction });
         pushLog({
@@ -1111,6 +1115,17 @@ export function AppProvider({ children }: { children: ReactNode }) {
       }
     },
     [pushLog],
+  );
+
+  const addAction = useCallback(
+    async (action: RecordedAction) => {
+      if (action.version === 'processed') {
+        await saveProcessedAction(action);
+        return;
+      }
+      dispatch({ type: 'ADD_ACTION', action: { ...action, trails: action.trails.map((trail) => [...trail]) } });
+    },
+    [saveProcessedAction],
   );
 
   const startPlayback = useCallback(
@@ -1541,6 +1556,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       recordTick,
       recordCountdownDone,
       saveProcessedAction,
+      addAction,
       startPlayback,
       startAging,
       agingTick,
@@ -1590,6 +1606,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       recordTick,
       recordCountdownDone,
       saveProcessedAction,
+      addAction,
       startPlayback,
       startAging,
       agingTick,

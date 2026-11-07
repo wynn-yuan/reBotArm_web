@@ -81,6 +81,9 @@ export interface RecordedAction {
   timedSamples?: TimedSample[];
   /** raw never changes; processed is a separately saved offline derivative. */
   version?: 'raw' | 'processed' | 'seed';
+  /** 录制/转换该动作所用的机型（arm_id / 展示名）；缺失 = 旧数据未标注。 */
+  armId?: string;
+  armName?: string;
   rawActionId?: string;
   processing?: {
     maxJointVelocity: number[];

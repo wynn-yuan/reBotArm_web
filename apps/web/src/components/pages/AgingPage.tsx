@@ -67,9 +67,11 @@ export function AgingPage() {
     () => state.recordedActions.filter((action) =>
       action.version === 'processed'
       && !action.demoOnly
+      // 机型标签与激活机型不一致的动作不展示（旧数据无标签时仍可选）。
+      && (!action.armId || !state.activeArm || action.armId === state.activeArm.armId)
       // 后端接受转动关节数或完整链路数（夹爪轨迹会被忽略）。
       && (action.trails.length === agingJointCount || action.trails.length === jointCount)),
-    [state.recordedActions, agingJointCount, jointCount],
+    [state.recordedActions, agingJointCount, jointCount, state.activeArm],
   );
   const [selectedActionId, setSelectedActionId] = useState('');
   const [loopMode, setLoopMode] = useState<'count' | 'duration' | 'infinite'>('count');
@@ -204,7 +206,7 @@ export function AgingPage() {
               <label className="field-label" htmlFor="aging-action">动作</label>
               <select id="aging-action" className="select" value={selectedActionId} disabled={active} onChange={(event) => setSelectedActionId(event.target.value)}>
                 <option value="">请选择</option>
-                {processedActions.map((action) => <option key={action.id} value={action.id}>{action.name}</option>)}
+                {processedActions.map((action) => <option key={action.id} value={action.id}>{action.name}{action.armName ? ` · ${action.armName}` : ''}</option>)}
               </select>
             </div>
 

@@ -1,13 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { CircleStop, Pause, Play, Save, Trash2 } from 'lucide-react';
+import { ArrowRightLeft, CircleStop, Pause, Play, Save, Trash2 } from 'lucide-react';
 import { useApp } from '../../state/AppContext';
 import { useTelemetry } from '../../state/TelemetryContext';
 import { ArmScene } from '../arm/ArmScene';
 import { ResizablePanel } from '../common/ResizablePanel';
 import { EmptyState } from '../common/EmptyState';
 import { StatusBadge } from '../common/StatusBadge';
+import { Modal } from '../common/Modal';
 import { formatClock, formatDuration } from '../../utils/format';
 import { retimeTrajectory, type TrajectoryRetimeResult } from '../../motion/trajectoryRetime';
+import { convertAction, convertTrails, fetchJointAxes, jointFlips, type JointLimit, type JointViolation } from '../../motion/armConversion';
 import { URDF_REVOLUTE_LIMITS } from '../../telemetry/jointTransform';
 import { armJointCount, armJointIds } from '../../types';
 import type { ArmModel, ControlMode, LiveJoint, RecordedAction, RecordConfig } from '../../types';
@@ -143,8 +145,26 @@ export function createProcessedAction(
     trails: result.trails.map((trail) => [...trail]),
     version: 'processed',
     rawActionId: raw.id,
+    armId: raw.armId,
+    armName: raw.armName,
     processing: { ...config, outputFrequency: result.diagnostics.outputFrequency },
   };
+}
+
+/** 目标机型按链路顺序（含夹爪）的关节限位。 */
+function armJointLimits(arm: ArmModel): JointLimit[] {
+  return armJointIds(arm).map((id) => {
+    const spec = arm.motors.find((m) => m.id === id) ?? (arm.gripper?.id === id ? arm.gripper : null);
+    return spec?.positionLimit ?? null;
+  });
+}
+
+/** 取机型各转动关节的 URDF 转轴（顺序 = motorIds）。 */
+function armJointAxes(arm: ArmModel, axes: ReadonlyMap<string, { x: number; y: number; z: number }>) {
+  return arm.motorIds.map((id) => {
+    const motor = arm.motors.find((m) => m.id === id);
+    return axes.get(motor?.urdfName ?? `joint${id}`);
+  });
 }
 
 function makeDefaultVelocities(count: number): number[] {
@@ -159,7 +179,9 @@ export function MotionCenterPage() {
     recordTick,
     recordCountdownDone,
     saveProcessedAction,
+    addAction,
     deleteAction,
+    pushLog,
     safetyActive,
     startZeroTorque,
     stopZeroTorque,
@@ -187,6 +209,11 @@ export function MotionCenterPage() {
   const [previewProgress, setPreviewProgress] = useState(0);
   const [previewPlaying, setPreviewPlaying] = useState(false);
   const [previewSpeed, setPreviewSpeed] = useState(1);
+  const [convertActionId, setConvertActionId] = useState<string | null>(null);
+  const [convertTargetId, setConvertTargetId] = useState('');
+  const [convertPlan, setConvertPlan] = useState<{ flips: boolean[]; labels: string[]; violations: JointViolation[] } | null>(null);
+  const [convertError, setConvertError] = useState<string | null>(null);
+  const [convertBusy, setConvertBusy] = useState(false);
 
   const livePositions = useMemo(() => collectTelemetryPositions(joints, jointIds), [joints, jointIds]);
   const freshPositions = stale ? null : livePositions;
@@ -346,6 +373,105 @@ export function MotionCenterPage() {
     setSelectedPreviewId(action.id);
   };
 
+  // ---- 机型转换 ----
+  const convertSource = state.recordedActions.find((action) => action.id === convertActionId) ?? null;
+  const convertSourceArm = state.models.find((model) => model.armId === convertSource?.armId) ?? null;
+  const convertTargets = useMemo(
+    () => state.models.filter((model) => model.armId !== convertSource?.armId),
+    [state.models, convertSource?.armId],
+  );
+  const convertTarget = convertTargets.find((model) => model.armId === convertTargetId) ?? convertTargets[0] ?? null;
+
+  const openConvert = (action: RecordedAction) => {
+    const preferred = state.models.find((model) => model.armId === state.activeArm?.armId && model.armId !== action.armId)
+      ?? state.models.find((model) => model.armId !== action.armId);
+    setConvertActionId(action.id);
+    setConvertTargetId(preferred?.armId ?? '');
+    setConvertPlan(null);
+    setConvertError(null);
+  };
+
+  const closeConvert = () => {
+    setConvertActionId(null);
+    setConvertPlan(null);
+    setConvertError(null);
+    setConvertBusy(false);
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    setConvertPlan(null);
+    setConvertError(null);
+    if (!convertSource || !convertTarget) return;
+    if (!convertSourceArm) {
+      setConvertError('该动作没有机型标签，无法确定源机型的关节方向。');
+      return;
+    }
+    const run = async () => {
+      try {
+        const [sourceAxes, targetAxes] = await Promise.all([
+          fetchJointAxes(convertSourceArm.armId),
+          fetchJointAxes(convertTarget.armId),
+        ]);
+        if (cancelled) return;
+        if (!sourceAxes || !targetAxes) throw new Error('无法读取机型 URDF，转换暂不可用');
+        if (convertSourceArm.motorIds.length !== convertTarget.motorIds.length) {
+          throw new Error(
+            `转动关节数不同（${convertSourceArm.motorIds.length} / ${convertTarget.motorIds.length}），无法转换`,
+          );
+        }
+        const labels = convertTarget.motorIds.map(
+          (id) => convertTarget.motors.find((motor) => motor.id === id)?.name ?? `J${id}`,
+        );
+        const flips = jointFlips(
+          armJointAxes(convertSourceArm, sourceAxes),
+          armJointAxes(convertTarget, targetAxes),
+          labels,
+        );
+        const { violations } = convertTrails(convertSource.trails, flips, {
+          targetHasGripper: convertTarget.gripper !== null,
+          limits: armJointLimits(convertTarget),
+        });
+        if (!cancelled) setConvertPlan({ flips, labels, violations });
+      } catch (error) {
+        if (!cancelled) setConvertError(error instanceof Error ? error.message : String(error));
+      }
+    };
+    void run();
+    return () => {
+      cancelled = true;
+    };
+  }, [convertSource, convertSourceArm, convertTarget]);
+
+  const handleConvert = async () => {
+    if (!convertSource || !convertTarget || !convertPlan || convertPlan.violations.length > 0) return;
+    setConvertBusy(true);
+    try {
+      const converted = convertAction(convertSource, {
+        armId: convertTarget.armId,
+        armName: convertTarget.name,
+        flips: convertPlan.flips,
+        limits: armJointLimits(convertTarget),
+        targetHasGripper: convertTarget.gripper !== null,
+      });
+      await addAction(converted);
+      setSelectedPreviewId(converted.id);
+      pushLog({
+        type: 'system',
+        result: 'success',
+        title: '机型转换完成',
+        detail: `动作「${convertSource.name}」→ ${convertTarget.name}；关节方向：${convertPlan.labels
+          .map((label, joint) => `${label}${convertPlan.flips[joint] ? '取负' : '不变'}`)
+          .join('，')}`,
+      });
+      closeConvert();
+    } catch (error) {
+      setConvertError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setConvertBusy(false);
+    }
+  };
+
   const limitDiagnostics = retimeResult ? diagnoseJointLimits(retimeResult.trails, jointDefs) : selectedRaw ? diagnoseJointLimits(selectedRaw.trails, jointDefs) : [];
   const recordingDuration = recording ? Math.max(0, Date.now() - recording.startedAt) : 0;
 
@@ -439,8 +565,56 @@ export function MotionCenterPage() {
 
       <section className="card">
         <div className="card-header"><div className="card-title">动作</div><span className="tertiary">{state.recordedActions.filter((action) => !action.demoOnly).length}</span></div>
-        <div className="card-body card-body--flush">{state.recordedActions.filter((action) => !action.demoOnly).length === 0 ? <EmptyState title="暂无动作" desc="" /> : <div className="table-scroll"><table className="motor-table"><thead><tr><th>名称</th><th>版本</th><th>关联 raw</th><th style={{ textAlign: 'right' }}>时长</th><th style={{ textAlign: 'right' }}>样本</th><th>创建时间</th><th>操作</th></tr></thead><tbody>{state.recordedActions.filter((action) => !action.demoOnly).map((action) => <tr key={action.id}><td>{action.name}</td><td><StatusBadge variant={action.version === 'processed' ? 'online' : 'offline'}>{action.version === 'processed' ? 'processed' : 'raw'}</StatusBadge></td><td className="mono tertiary">{action.rawActionId ?? '—'}</td><td style={{ textAlign: 'right' }}>{formatDuration(action.durationMs)}</td><td style={{ textAlign: 'right' }}>{action.sampleCount}</td><td>{formatClock(action.createdAt)}</td><td><div className="row"><button className="btn btn--sm btn--primary" onClick={() => setSelectedPreviewId(action.id)}><Play size={12} /> 预览</button><button className="btn btn--sm" onClick={() => deleteAction(action.id)} disabled={previewAction?.id === action.id}><Trash2 size={12} /> 删除</button></div></td></tr>)}</tbody></table></div>}</div>
+        <div className="card-body card-body--flush">{state.recordedActions.filter((action) => !action.demoOnly).length === 0 ? <EmptyState title="暂无动作" desc="" /> : <div className="table-scroll"><table className="motor-table"><thead><tr><th>名称</th><th>机型</th><th>版本</th><th>关联 raw</th><th style={{ textAlign: 'right' }}>时长</th><th style={{ textAlign: 'right' }}>样本</th><th>创建时间</th><th>操作</th></tr></thead><tbody>{state.recordedActions.filter((action) => !action.demoOnly).map((action) => <tr key={action.id}><td>{action.name}</td><td>{action.armId ? <span className="tag">{action.armName ?? action.armId}</span> : <span className="tertiary">未标注</span>}</td><td><StatusBadge variant={action.version === 'processed' ? 'online' : 'offline'}>{action.version === 'processed' ? 'processed' : 'raw'}</StatusBadge></td><td className="mono tertiary">{action.rawActionId ?? '—'}</td><td style={{ textAlign: 'right' }}>{formatDuration(action.durationMs)}</td><td style={{ textAlign: 'right' }}>{action.sampleCount}</td><td>{formatClock(action.createdAt)}</td><td><div className="row"><button className="btn btn--sm btn--primary" onClick={() => setSelectedPreviewId(action.id)}><Play size={12} /> 预览</button><button className="btn btn--sm" onClick={() => openConvert(action)} disabled={!action.armId || state.models.length < 2} title={!action.armId ? '该动作没有机型标签，无法转换' : state.models.length < 2 ? '需要至少两款机型' : '转换到另一款机型'}><ArrowRightLeft size={12} /> 转换</button><button className="btn btn--sm" onClick={() => deleteAction(action.id)} disabled={previewAction?.id === action.id}><Trash2 size={12} /> 删除</button></div></td></tr>)}</tbody></table></div>}</div>
       </section>
+
+      <Modal
+        open={convertActionId !== null}
+        title="机型转换"
+        onClose={closeConvert}
+        footer={
+          <div className="row" style={{ justifyContent: 'flex-end', gap: 'var(--space-2)' }}>
+            <button className="btn" onClick={closeConvert}>取消</button>
+            <button
+              className="btn btn--primary"
+              disabled={!convertPlan || convertPlan.violations.length > 0 || convertBusy}
+              onClick={() => { void handleConvert(); }}
+            >
+              <ArrowRightLeft size={14} /> {convertBusy ? '转换中…' : '转换并保存'}
+            </button>
+          </div>
+        }
+      >
+        {convertSource && (
+          <div className="stack">
+            <div className="kv"><span className="kv__k">源动作</span><span className="kv__v">{convertSource.name}</span></div>
+            <div className="kv"><span className="kv__k">源机型</span><span className="kv__v">{convertSourceArm ? <span className="tag">{convertSourceArm.name}</span> : <span className="tertiary">未标注</span>}</span></div>
+            <div className="field">
+              <label className="field-label" htmlFor="convert-target">目标机型</label>
+              <select
+                id="convert-target"
+                className="select"
+                value={convertTarget?.armId ?? ''}
+                onChange={(event) => setConvertTargetId(event.target.value)}
+              >
+                {convertTargets.map((model) => <option key={model.armId} value={model.armId}>{model.name}</option>)}
+              </select>
+            </div>
+            {convertPlan && (
+              <div className="field-hint">
+                关节方向：{convertPlan.labels.map((label, joint) => `${label}${convertPlan.flips[joint] ? ' 取负' : ' 不变'}`).join(' · ')}
+              </div>
+            )}
+            {convertPlan && convertPlan.violations.length > 0 && (
+              <div className="motion-center__error" role="alert">
+                超出 {convertTarget?.name} 限位：{convertPlan.violations.map((v) => `${convertPlan.labels[v.joint]} ${v.min.toFixed(3)}…${v.max.toFixed(3)} 不在 [${v.lower}, ${v.upper}]`).join('；')}
+              </div>
+            )}
+            {convertError && <div className="motion-center__error" role="alert">{convertError}</div>}
+            <div className="field-hint">转换只取负关节方向并丢弃目标机型没有的夹爪轨迹，不改动源动作；结果会保存为新动作。</div>
+          </div>
+        )}
+      </Modal>
     </div>
   );
 }
