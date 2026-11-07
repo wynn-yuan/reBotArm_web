@@ -106,86 +106,26 @@ export function ModelPage() {
             const isActive = arm.armId === activeArm?.armId;
             return (
               <div key={arm.armId} className={`card model-card${isActive ? ' model-card--active' : ''}`}>
-                <div className="card-header">
-                  <div>
-                    <div className="card-title">
-                      <Bot size={16} /> {arm.name}
-                    </div>
-                    <div className="card-subtitle">
-                      {arm.armId} · vendor {arm.vendor} · CAN 主机 0x{arm.hostId.toString(16).toUpperCase()}
-                    </div>
+                <div className="model-card__head">
+                  <div className="card-title">
+                    <Bot size={16} /> {arm.name}
                   </div>
                   {isActive && <StatusBadge variant="online">当前激活</StatusBadge>}
                 </div>
-
-                <div className="card-body stack">
-                  <div className="motion-center__form-grid">
-                    <div className="kv">
-                      <span className="kv__k">旋转关节</span>
-                      <span className="kv__v mono">{arm.jointCount} 个（{arm.motorIds.join('、')}）</span>
-                    </div>
-                    <div className="kv">
-                      <span className="kv__k">夹爪</span>
-                      <span className="kv__v mono">
-                        {arm.gripper
-                          ? `ID ${arm.gripper.id} · ${arm.gripper.vendor}/${arm.gripper.model}`
-                          : '无'}
-                      </span>
-                    </div>
-                  </div>
-
-                  <div className="table-scroll">
-                    <table className="motor-table" aria-label={`${arm.armId} 关节电机表`}>
-                      <thead>
-                        <tr>
-                          <th>关节</th>
-                          <th>型号</th>
-                          <th style={{ textAlign: 'right' }}>限位 (rad)</th>
-                          <th style={{ textAlign: 'right' }}>MIT KP/KD</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {arm.motors.map((m) => (
-                          <tr key={m.id}>
-                            <td className="mono">{m.name} {m.label}</td>
-                            <td className="mono">{m.vendor}/{m.model}</td>
-                            <td className="mono" style={{ textAlign: 'right' }}>
-                              {m.positionLimit ? m.positionLimit.join('…') : '—'}
-                            </td>
-                            <td className="mono" style={{ textAlign: 'right' }}>
-                              {m.mitKp != null && m.mitKd != null ? `${m.mitKp}/${m.mitKd}` : '—'}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-
+                <button
+                  className="btn btn--primary btn--lg model-card__activate"
+                  disabled={isActive || switching === arm.armId}
+                  onClick={() => handleActivate(arm.armId)}
+                  title={isActive ? '当前已激活' : connected ? '切换机型会先断开当前连接' : undefined}
+                >
                   {isActive ? (
-                    <div className="model-card__actions">
-                      <button
-                        className="btn btn--primary btn--lg"
-                        disabled
-                        title="当前已激活"
-                      >
-                        已激活
-                      </button>
-                    </div>
+                    '已激活'
+                  ) : switching === arm.armId ? (
+                    <><RefreshCw size={14} className="spin" /> 切换中…</>
                   ) : (
-                    <button
-                      className="btn btn--primary btn--lg"
-                      disabled={switching === arm.armId}
-                      onClick={() => handleActivate(arm.armId)}
-                      title={connected ? '切换机型会先断开当前连接' : undefined}
-                    >
-                      {switching === arm.armId ? (
-                        <><RefreshCw size={14} className="spin" /> 切换中…</>
-                      ) : (
-                        '激活'
-                      )}
-                    </button>
+                    '激活'
                   )}
-                </div>
+                </button>
               </div>
             );
           })}

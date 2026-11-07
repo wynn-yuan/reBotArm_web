@@ -12,11 +12,11 @@
 #   $BASE/current -> releases/<release-id>          (atomic symlink swap)
 #   $BASE/shared/env/rebotarm.env                   (mode 600; kept if exists)
 #   $BASE/shared/logs/
-#   $BASE/shared/venv/                              (Python 3.10 venv)
+#   $BASE/shared/venv/                              (Python >= 3.10 venv)
 #   $BASE/bin/rebotarm-{start,stop,health}.sh
 #
 # Fail closed: refuses to overwrite an existing release id, refuses unknown
-# tarball shapes, refuses a non-3.10 interpreter for the venv.
+# tarball shapes, refuses a Python older than 3.10 for the venv.
 
 set -eu
 
@@ -109,19 +109,21 @@ trap - EXIT
 
 REL="$BASE/releases/$RELEASE_ID"
 
-# --- 3. Python 3.10 venv (created once, reused across releases) --------------
+# --- 3. Python venv (created once, reused across releases) ------------------
+# pyproject declares requires-python >= 3.10; any 3.10+ interpreter is fine
+# (Jetson images ship 3.10, the dev host here runs 3.11). pip enforces the
+# floor itself.
 PYTHON_BIN=""
-for candidate in python3.10 python3; do
+for candidate in python3.10 python3.11 python3.12 python3; do
     if command -v "$candidate" >/dev/null 2>&1; then
-        ver=$("$candidate" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || echo "")
-        if [ "$ver" = "3.10" ]; then
+        if "$candidate" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' 2>/dev/null; then
             PYTHON_BIN=$(command -v "$candidate")
             break
         fi
     fi
 done
 if [ -z "$PYTHON_BIN" ]; then
-    echo "ERROR: no Python 3.10 interpreter found (fail closed)." >&2
+    echo "ERROR: no Python >= 3.10 interpreter found (fail closed)." >&2
     exit 1
 fi
 

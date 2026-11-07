@@ -130,14 +130,12 @@ def _same_build(a: str, b: str) -> bool:
     return bool(a) and bool(b) and norm(a) == norm(b)
 
 
-def _current_release_id() -> str:
-    """Best-effort release id of the running deployment.
+def _deployment_release_id() -> Optional[str]:
+    """Release id from the deployment layout, or None for a source run.
 
     Prefers the A/B release symlink (``REBOTARM_BASE/current -> releases/<id>``),
     then any ``current`` symlink / ``VERSION`` file found walking up from this
-    module, and finally the package ``__version__`` so a source/dev run still
-    reports something real instead of ``None`` (which made ``has_update``
-    comparisons meaningless).
+    module. A source run has neither, so OTA cannot install there.
     """
     candidates = []
     base = _resolve_base()
@@ -163,7 +161,12 @@ def _current_release_id() -> str:
                 continue
             if value and "/" not in value and ".." not in value:
                 return value
-    return str(__version__)
+    return None
+
+
+def _current_release_id() -> str:
+    """Display id of the running build (release id, else package version)."""
+    return _deployment_release_id() or str(__version__)
 
 
 #: GitHub repository for OTA updates.
@@ -267,6 +270,14 @@ _step() {{
     echo "[OTA] $MSG"
 }}
 
+# 安装中途失败时写入 error 进度，避免界面永远停在某个百分比。
+_REPORTED=0
+_fail() {{
+    [ "$_REPORTED" -eq 1 ] || printf '{{"step":"error","message":"安装失败，请查看 shared/logs/server.out","progress":1.0}}\\n' > "$PROGRESS"
+    rm -rf "$TMPDIR"
+}}
+trap '_rc=$?; [ "$_rc" -eq 0 ] || _fail' EXIT
+
 _step "preparing" "正在准备安装..." 0.44
 _step "stopping" "正在停止服务..." 0.48
 "$BASE/bin/rebotarm-stop.sh" 2>/dev/null || true
@@ -279,6 +290,7 @@ mkdir -p "$EXTRACT_DIR"
 tar -xzf "$TARBALL" -C "$EXTRACT_DIR"
 
 if [ -e "$BASE/releases/$RELEASE_ID" ]; then
+    _REPORTED=1
     printf '{{"step":"error","message":"release already exists: %s","progress":1.0}}\\n' "$RELEASE_ID" > "$PROGRESS"
     echo "[OTA] ERROR: release already exists"
     rm -rf "$TMPDIR"
@@ -312,27 +324,40 @@ echo "[OTA] done: $RELEASE_ID"
 
 @router.get("/api/ota/check")
 def get_ota_check(request: Request) -> dict:
-    """Check GitHub for the latest release and compare with current version."""
-    current_id = _current_release_id()
-    current_known = bool(current_id)
+    """Check GitHub for the latest release and compare with current version.
+
+    ``current`` is the release id only for a release deployment. A source run
+    has no install target, so ``current`` is null and ``install_supported``
+    is false (the UI must not pretend the package version is a release).
+    """
+    deployed_id = _deployment_release_id()
+    install_supported = deployed_id is not None
 
     latest = _github_api("releases/latest")
     if latest is None:
         return {
             "ok": False,
             "error": "no releases found on GitHub",
-            "current": current_id,
-            "current_known": current_known,
+            "current": deployed_id,
+            "current_version": str(__version__),
+            "current_known": install_supported,
+            "install_supported": install_supported,
             "latest": None,
             "has_update": False,
         }
 
     latest_tag = latest.get("tag_name", "")
-    has_update = bool(latest_tag and current_id and not _same_build(latest_tag, current_id))
+    has_update = bool(
+        latest_tag
+        and install_supported
+        and not _same_build(latest_tag, deployed_id)
+    )
     return {
         "ok": True,
-        "current": current_id,
-        "current_known": current_known,
+        "current": deployed_id,
+        "current_version": str(__version__),
+        "current_known": install_supported,
+        "install_supported": install_supported,
         "latest": latest_tag,
         "has_update": has_update,
         "latest_name": latest.get("name", ""),
@@ -381,6 +406,15 @@ def post_ota_github(
     zero = request.app.state.writes.zero_torque_status()
     if zero.get("status") != "inactive":
         return JSONResponse({"error": "zero-torque is active"}, status_code=409)
+
+    if _deployment_release_id() is None:
+        return JSONResponse(
+            {
+                "error": "not a release deployment: no current/VERSION found; "
+                "online update requires install_release.sh / deploy.sh"
+            },
+            status_code=409,
+        )
 
     base = _resolve_base()
     _write_progress(base, "downloading", "正在连接 GitHub…", 0.01)
@@ -482,6 +516,15 @@ async def post_ota_update(
     if zero.get("status") != "inactive":
         return JSONResponse(
             {"error": "zero-torque is active; exit zero-torque before OTA update"},
+            status_code=409,
+        )
+
+    if _deployment_release_id() is None:
+        return JSONResponse(
+            {
+                "error": "not a release deployment: no current/VERSION found; "
+                "online update requires install_release.sh / deploy.sh"
+            },
             status_code=409,
         )
 

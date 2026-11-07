@@ -8,9 +8,11 @@ import { postDisable, postEnable, toErrorMessage } from '../../api/client';
 interface OtaCheckResult {
   ok: boolean;
   error?: string;
-  current?: string;
+  current?: string | null;
+  current_version?: string;
   current_known?: boolean;
-  latest?: string;
+  install_supported?: boolean;
+  latest?: string | null;
   has_update?: boolean;
   latest_name?: string;
   latest_body?: string;
@@ -262,26 +264,29 @@ export function TopBar({ onEmergencyClick }: Props) {
             <div className="stack stack--sm">
               <div className="kv">
                 <span className="kv__k">当前版本</span>
-                <span className="kv__v mono">{otaStatus.current ?? '—'}</span>
+                <span className="kv__v mono">
+                  {otaStatus.install_supported === false
+                    ? `源码运行 · rebot-server ${otaStatus.current_version ?? '—'}`
+                    : otaStatus.current ?? '—'}
+                </span>
               </div>
               <div className="kv">
                 <span className="kv__k">最新版本</span>
                 <span className="kv__v mono">{otaStatus.latest ?? '—'}</span>
               </div>
-              {otaStatus.has_update && (
+              {otaStatus.install_supported === false ? (
+                <div className="state-box" style={{ background: 'var(--color-warning-dim)', borderColor: 'var(--color-warning)' }}>
+                  <div className="state-box__desc">当前为源码运行，未检测到 release 部署目录；在线更新仅适用于 install_release.sh / deploy.sh 部署的实例。</div>
+                </div>
+              ) : otaStatus.has_update ? (
                 <div className="state-box" style={{ background: 'var(--color-primary-dim)', borderColor: 'var(--color-primary)' }}>
                   <div className="state-box__desc">有新版本可用</div>
                 </div>
-              )}
-              {!otaStatus.has_update && otaStatus.latest && (otaStatus.current_known ? (
+              ) : otaStatus.latest ? (
                 <div className="state-box" style={{ background: 'var(--color-success-dim)', borderColor: 'var(--color-success)' }}>
                   <div className="state-box__desc">已是最新版本</div>
                 </div>
-              ) : (
-                <div className="state-box" style={{ background: 'var(--color-warning-dim)', borderColor: 'var(--color-warning)' }}>
-                  <div className="state-box__desc">无法确认当前版本，未能判断是否有更新</div>
-                </div>
-              ))}
+              ) : null}
             </div>
           )}
           {otaError && <div className="state-box state-box--error"><div className="state-box__desc">{otaError}</div></div>}
@@ -307,12 +312,12 @@ export function TopBar({ onEmergencyClick }: Props) {
             </div>
           )}
           <div className="row" style={{ gap: 8 }}>
-            {!otaProgress && (
+            {(!otaProgress || otaProgress.step === 'error') && (
             <>
               <button className="btn btn--primary" onClick={() => { void checkOta(); }} disabled={otaChecking}>
                 {otaChecking ? '检查中…' : '检查更新'}
               </button>
-              {otaStatus?.has_update && (
+              {otaStatus?.has_update && otaStatus.install_supported !== false && (
                 <button className="btn btn--warning" onClick={() => { void doOtaUpdate(); }} disabled={otaUpdating}>
                   {otaUpdating ? '更新中…' : '立即更新'}
                 </button>

@@ -10,6 +10,7 @@ from unittest import mock
 import rebot_server
 from rebot_server.ota import (
     _current_release_id,
+    _deployment_release_id,
     _download_asset,
     _same_build,
     _write_progress,
@@ -51,6 +52,15 @@ class CurrentReleaseIdTests(unittest.TestCase):
     def test_last_resort_is_package_version(self):
         with tempfile.TemporaryDirectory() as tmp:
             with mock.patch.dict(os.environ, {"REBOTARM_BASE": tmp}, clear=False):
+                self.assertEqual(_current_release_id(), str(rebot_server.__version__))
+
+
+class DeploymentIdTests(unittest.TestCase):
+    def test_source_run_has_no_deployment_release_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(os.environ, {"REBOTARM_BASE": tmp}, clear=False):
+                self.assertIsNone(_deployment_release_id())
+                # Display id still reports the package version.
                 self.assertEqual(_current_release_id(), str(rebot_server.__version__))
 
 
