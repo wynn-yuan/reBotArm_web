@@ -180,25 +180,28 @@ _DEFAULT_TOKEN = (
 
 
 def _github_api(path: str) -> Optional[dict]:
-    """GET request to GitHub API. Returns parsed JSON or None."""
+    """GET request to GitHub API (one retry on network errors). Returns parsed JSON or None."""
     req = UrlRequest(f"{_GITHUB_API}/{path}")
     req.add_header("Accept", "application/vnd.github+json")
     req.add_header("User-Agent", "rebot-server-ota")
     token = os.environ.get("GITHUB_TOKEN", _DEFAULT_TOKEN)
     if token:
         req.add_header("Authorization", f"Bearer {token}")
-    try:
-        with urlopen(req, timeout=30) as resp:
-            return json.loads(resp.read().decode())
-    except HTTPError as exc:
-        # 404 = no releases yet; other codes are real errors
-        if exc.code == 404:
+    for attempt in range(2):
+        try:
+            with urlopen(req, timeout=30) as resp:
+                return json.loads(resp.read().decode())
+        except HTTPError as exc:
+            # 404 = no releases yet; other codes are real errors
+            if exc.code == 404:
+                return None
+            logger.warning("OTA: GitHub API HTTP %s: %s", exc.code, exc.reason)
             return None
-        logger.warning("OTA: GitHub API HTTP %s: %s", exc.code, exc.reason)
-        return None
-    except (URLError, json.JSONDecodeError, OSError) as exc:
-        logger.warning("OTA: GitHub API failed: %s", exc)
-        return None
+        except (URLError, json.JSONDecodeError, OSError) as exc:
+            logger.warning("OTA: GitHub API failed (attempt %d/2): %s", attempt + 1, exc)
+            if attempt == 0:
+                time.sleep(1)
+    return None
 
 
 def _download_asset(
