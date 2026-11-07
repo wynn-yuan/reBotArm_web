@@ -93,6 +93,15 @@ export function ParameterPage() {
     return init;
   });
 
+  // 切换机型后参数表整体替换（RS ↔ DM），草稿跟随重算，避免显示上一机型的数值。
+  useEffect(() => {
+    const init = {} as Record<MotorId, DraftPair>;
+    for (const p of state.jointParams) {
+      init[p.motorId] = { kp: String(p.kp), kd: String(p.kd) };
+    }
+    setDrafts(init);
+  }, [state.jointParams]);
+
   // 二次确认弹窗：只需在风险提示后点击确认，不要求输入短语。
   const [confirmApplyOpen, setConfirmApplyOpen] = useState(false);
   const [confirmZeroOpen, setConfirmZeroOpen] = useState(false);

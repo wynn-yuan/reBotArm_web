@@ -447,7 +447,8 @@ export interface LiveJoint {
 
 // ===== 参数配置：电机参数 =====
 // 电机型号（RS 硬件参考配置 rebotarm_rs.yaml）：J1–J3 为 rs-06，J4–J6 与夹爪为 rs-00
-export type MotorModel = 'rs-06' | 'rs-00';
+/** 电机型号字符串：robstride 'rs-06' / damiao '4340P' 等，来自机型 model.yaml */
+export type MotorModel = string;
 
 /**
  * 单个关节的持久化增益镜像。

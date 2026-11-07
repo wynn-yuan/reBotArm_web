@@ -8,10 +8,12 @@ import {
   CircleCheck,
   Info,
   TriangleAlert,
+  Trash2,
 } from 'lucide-react';
 import { useApp } from '../../state/AppContext';
 import { EmptyState } from '../common/EmptyState';
 import { Drawer } from '../common/Drawer';
+import { ConfirmDialog } from '../common/ConfirmDialog';
 import { StatusBadge } from '../common/StatusBadge';
 import { formatDateTime } from '../../utils/format';
 import type { LogEntry, LogEventType, LogResult } from '../../types';
@@ -65,11 +67,12 @@ const TYPE_LABEL: Record<LogEventType, string> = {
 };
 
 export function LogsPage() {
-  const { state } = useApp();
+  const { state, deleteLog, clearLogs } = useApp();
   const [typeFilter, setTypeFilter] = useState<LogEventType | 'all'>('all');
   const [resultFilter, setResultFilter] = useState<LogResult | 'all'>('all');
   const [selected, setSelected] = useState<LogEntry | null>(null);
   const [exporting, setExporting] = useState(false);
+  const [confirmClear, setConfirmClear] = useState(false);
 
   const filtered = useMemo(() => {
     return state.logs.filter((l) => {
@@ -125,6 +128,13 @@ export function LogsPage() {
         <div className="page-actions">
           <button className="btn" onClick={handleExport} disabled={state.logs.length === 0 || exporting}>
             <Download size={14} /> {exporting ? '已生成' : '导出 CSV'}
+          </button>
+          <button
+            className="btn btn--danger"
+            onClick={() => setConfirmClear(true)}
+            disabled={state.logs.length === 0}
+          >
+            <Trash2 size={14} /> 清空日志
           </button>
         </div>
       </div>
@@ -216,7 +226,7 @@ export function LogsPage() {
                       <th style={{ width: 100 }}>类型</th>
                       <th style={{ width: 100 }}>结果</th>
                       <th>标题</th>
-                      <th style={{ width: 100 }}>操作</th>
+                      <th style={{ width: 120 }}>操作</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -231,9 +241,19 @@ export function LogsPage() {
                         </td>
                         <td>{l.title}</td>
                         <td>
-                          <button className="btn btn--sm" onClick={() => setSelected(l)}>
-                            查看
-                          </button>
+                          <div className="row" style={{ gap: 'var(--space-1)' }}>
+                            <button className="btn btn--sm" onClick={() => setSelected(l)}>
+                              查看
+                            </button>
+                            <button
+                              className="btn btn--sm"
+                              onClick={() => deleteLog(l.id)}
+                              aria-label={`删除日志 ${l.title}`}
+                              title="删除这条日志"
+                            >
+                              <Trash2 size={12} />
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     ))}
@@ -245,15 +265,40 @@ export function LogsPage() {
         </div>
       </div>
 
+      <ConfirmDialog
+        open={confirmClear}
+        title="清空全部日志？"
+        description="将删除日志中心当前记录的全部事件（仅浏览器会话内的记录，不影响老化数据文件）。"
+        confirmLabel="清空"
+        confirmVariant="danger"
+        onConfirm={() => {
+          clearLogs();
+          setSelected(null);
+          setConfirmClear(false);
+        }}
+        onCancel={() => setConfirmClear(false)}
+      />
+
       {/* 详情抽屉 */}
       <Drawer
         open={selected !== null}
         title="事件详情"
         onClose={() => setSelected(null)}
         footer={
-          <button className="btn btn--ghost" onClick={() => setSelected(null)}>
-            <X size={14} /> 关闭
-          </button>
+          <div className="row" style={{ gap: 'var(--space-2)' }}>
+            <button
+              className="btn btn--danger"
+              onClick={() => {
+                if (selected) deleteLog(selected.id);
+                setSelected(null);
+              }}
+            >
+              <Trash2 size={14} /> 删除此条
+            </button>
+            <button className="btn btn--ghost" onClick={() => setSelected(null)}>
+              <X size={14} /> 关闭
+            </button>
+          </div>
         }
       >
         {selected && (

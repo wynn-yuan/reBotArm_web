@@ -63,29 +63,29 @@
   --color-primary-hover: #ff6a2c;
   --color-primary-active: #d94a14;
   /* 不透明浅色底：工业面板不做半透明玻璃效果。 */
-  --color-primary-dim: #f6d8c8;
+  --color-primary-dim: #f2c6ae;
   --color-primary-border: rgba(241, 91, 34, 0.55);
   --color-accent: var(--dp-color-accent);
 
   /* ---- 状态语义色 ---- */
-  --color-online-dim: #cfe2d6;
+  --color-online-dim: #b7d9c4;
   --color-online-border: rgba(22, 128, 61, 0.42);
 
   --color-warning: #9a5b06;
-  --color-warning-dim: #eadfc6;
+  --color-warning-dim: #e5d0a2;
   --color-warning-border: rgba(154, 91, 6, 0.45);
 
   --color-danger: #b3261e;
   --color-danger-hover: #8c1d17;
-  --color-danger-dim: #e8cfcc;
+  --color-danger-dim: #e3bfba;
   --color-danger-border: rgba(179, 38, 30, 0.42);
 
   --color-info: #0b5e80;
-  --color-info-dim: #cfdfe6;
+  --color-info-dim: #bcd4de;
   --color-info-border: rgba(11, 94, 128, 0.4);
 
   --color-success: #16803d;
-  --color-success-dim: #cfe2d6;
+  --color-success-dim: #b7d9c4;
   --color-bg-inset: var(--bg-inset);
 
   /* ---- 状态徽标 / LED ---- */
@@ -137,13 +137,13 @@
   --radius-xl: 10px;
   --radius-full: 9999px;
 
-  /* ---- 深度系统（光源固定左上） ---- */
-  --shadow-1: inset 0 1px 0 rgba(255, 255, 255, 0.7),
-    inset 0 -1px 0 rgba(24, 30, 34, 0.12), 0 1px 2px rgba(24, 30, 34, 0.18);
-  --shadow-card: inset 0 1px 0 rgba(255, 255, 255, 0.72),
-    inset 0 -1px 0 rgba(24, 30, 34, 0.12), 0 1px 3px rgba(24, 30, 34, 0.16);
-  --shadow-floating: inset 0 1px 0 rgba(255, 255, 255, 0.85),
-    inset 0 -1px 0 rgba(24, 30, 34, 0.14), 0 3px 8px rgba(24, 30, 34, 0.2);
+  /* ---- 深度系统（光源固定左上；凸起只靠暗边与投影，不做玻璃高光） ---- */
+  --shadow-1: inset 0 -1px 0 rgba(24, 30, 34, 0.12),
+    0 1px 2px rgba(24, 30, 34, 0.18);
+  --shadow-card: inset 0 -1px 0 rgba(24, 30, 34, 0.12),
+    0 1px 3px rgba(24, 30, 34, 0.16);
+  --shadow-floating: inset 0 -1px 0 rgba(24, 30, 34, 0.14),
+    0 3px 8px rgba(24, 30, 34, 0.2);
   --shadow-2: var(--shadow-floating);
   --shadow-pressed: inset 0 2px 4px rgba(24, 30, 34, 0.3),
     inset 0 -1px 0 rgba(255, 255, 255, 0.4);

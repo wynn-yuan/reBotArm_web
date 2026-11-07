@@ -109,6 +109,8 @@ type Action =
   | { type: 'READONLY_DISCONNECT'; payload: RobotConnection }
   | { type: 'READONLY_DISCONNECT_ERROR'; payload: { error: string } }
   | { type: 'ADD_LOG'; entry: LogEntry }
+  | { type: 'DELETE_LOG'; id: string }
+  | { type: 'CLEAR_LOGS' }
   | { type: 'ADD_ACTION'; action: RecordedAction }
   | { type: 'ACTIONS_LOAD'; actions: RecordedAction[] }
   | { type: 'DELETE_ACTION'; id: string }
@@ -495,6 +497,12 @@ function reducer(state: AppState, action: Action): AppState {
     case 'ADD_LOG':
       return { ...state, logs: [action.entry, ...state.logs].slice(0, 500) };
 
+    case 'DELETE_LOG':
+      return { ...state, logs: state.logs.filter((l) => l.id !== action.id) };
+
+    case 'CLEAR_LOGS':
+      return { ...state, logs: [] };
+
     case 'ADD_ACTION':
       return { ...state, recordedActions: [action.action, ...state.recordedActions] };
 
@@ -554,22 +562,62 @@ function reducer(state: AppState, action: Action): AppState {
       // 409 / 网络错误：不得伪装成 connected，展示错误并清除在途标志
       return { ...state, connection: connectionReducer(state.connection, action) };
 
-    case 'MODELS_LOAD':
+    case 'MODELS_LOAD': {
+      const activeArm =
+        state.activeArm ??
+        action.payload.models.find((m) => m.armId === action.payload.activeArmId) ??
+        null;
       return {
         ...state,
         models: action.payload.models,
-        activeArm:
-          state.activeArm ??
-          action.payload.models.find((m) => m.armId === action.payload.activeArmId) ??
-          null,
+        activeArm,
+        // 参数表跟随激活机型（DM 不再显示 RS 的型号/增益）
+        jointParams: state.activeArm ? state.jointParams : jointParamsFromModel(activeArm),
       };
+    }
 
     case 'MODELS_ACTIVE_SET':
-      return { ...state, activeArm: action.payload };
+      return {
+        ...state,
+        activeArm: action.payload,
+        jointParams: jointParamsFromModel(action.payload),
+      };
 
     default:
       return state;
   }
+}
+
+/**
+ * 参数表按激活机型生成：型号 / MIT KP/KD 取自 model.yaml。
+ * 未激活机型时回退 RS 参考默认值（B601 历史缺省，测试/降级用）。
+ */
+function jointParamsFromModel(arm: ArmModel | null): JointParam[] {
+  if (!arm) return makeSeedJointParams();
+  const rows: JointParam[] = arm.motors.map((m) => ({
+    motorId: m.id as MotorId,
+    hostId: arm.hostId,
+    model: `${m.vendor}/${m.model}`,
+    kp: m.mitKp ?? 0,
+    kd: m.mitKd ?? 0,
+    defaultKp: m.mitKp ?? 0,
+    defaultKd: m.mitKd ?? 0,
+    lastUpdated: null,
+  }));
+  if (arm.gripper) {
+    const g = arm.gripper;
+    rows.push({
+      motorId: g.id as MotorId,
+      hostId: arm.hostId,
+      model: `${g.vendor}/${g.model}`,
+      kp: g.mitKp ?? 0,
+      kd: g.mitKd ?? 0,
+      defaultKp: g.mitKp ?? 0,
+      defaultKd: g.mitKd ?? 0,
+      lastUpdated: null,
+    });
+  }
+  return rows;
 }
 
 const INITIAL_STATE: AppState = {
@@ -646,6 +694,9 @@ export interface AppContextValue {
   resetEmergency: () => void;
   deleteAction: (id: string) => void;
   pushLog: (entry: Omit<LogEntry, 'id' | 'sessionId' | 'timestamp'>) => void;
+  /** 删除单条日志 / 清空日志中心（仅本地会话记录，不触碰老化日志文件）。 */
+  deleteLog: (id: string) => void;
+  clearLogs: () => void;
   /** 参数配置：持久化位置环 KP / 速度环 KP（不调用 send_mit）。 */
   applyMitGains: (changes: MitGainChange[]) => Promise<void>;
   /** 参数配置：用户确认后执行真实整机机械零位写入。 */
@@ -713,6 +764,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
         timestamp: Date.now(),
       },
     });
+  }, []);
+
+  const deleteLog = useCallback((id: string) => {
+    dispatch({ type: 'DELETE_LOG', id });
+  }, []);
+
+  const clearLogs = useCallback(() => {
+    dispatch({ type: 'CLEAR_LOGS' });
   }, []);
 
   /** 真机只读模式下拒绝写操作（统一日志）。 */
@@ -1504,6 +1563,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
       resetEmergency,
       deleteAction,
       pushLog,
+      deleteLog,
+      clearLogs,
       applyMitGains,
       setMechanicalZero,
       zeroTorqueStatus,
@@ -1553,6 +1614,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
       resetEmergency,
       deleteAction,
       pushLog,
+      deleteLog,
+      clearLogs,
       applyMitGains,
       setMechanicalZero,
       zeroTorqueStatus,
