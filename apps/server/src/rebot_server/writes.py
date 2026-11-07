@@ -84,6 +84,10 @@ class WriteController:
         self._service = service
         self._op_lock = threading.Lock()
 
+    def update_settings(self, settings: Settings) -> None:
+        """机型切换后换用新 settings（调用方保证此时已断开连接）。"""
+        self._settings = settings
+
     def enable_all(self) -> Dict[str, Any]:
         return self._run("enable_all")
 
@@ -234,9 +238,11 @@ class WriteController:
 
     def _require_connected(self, operation: str) -> None:
         snapshot = self._service.snapshot()
-        if snapshot.get("status") != STATUS_CONNECTED or set(snapshot.get("found_ids") or ()) != set(self._settings.expected_ids):
+        expected = self._settings.expected_ids
+        if snapshot.get("status") != STATUS_CONNECTED or set(snapshot.get("found_ids") or ()) != set(expected):
+            ids = ", ".join(str(i) for i in expected) or "(未配置)"
             raise RequiresConnectedError(
-                f"{operation} requires a completed full scan of motor IDs 1..7"
+                f"{operation} requires a completed full scan of motor IDs {ids}"
             )
 
     @contextmanager

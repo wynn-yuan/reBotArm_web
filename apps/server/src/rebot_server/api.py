@@ -658,9 +658,18 @@ def _apply_arm(request: Request, arm) -> None:
         mit_kp=mit_kp,
         mit_kd=mit_kd,
     )
-    request.app.state.service.replace_scanner(
-        create_scanner(switched), arm.joint_ids
-    )
+    service = request.app.state.service
+    service.replace_scanner(create_scanner(switched), arm.joint_ids)
+    # 写入校验 / 遥测 / 老化都各自持有 settings（或从中缓存的关节数），只换
+    # scanner 会让它们继续按旧机型判（RS 的 1..7 对 DM 的 1..6 → 所有写入报
+    # “requires a completed full scan”）。切换只在断开状态允许，运行时无活动
+    # 会话，重建是安全的。
+    state = request.app.state
+    state.settings = switched
+    state.writes.update_settings(switched)
+    state.telemetry_hub.update_settings(switched)
+    state.aging_recorder.update_joint_count(len(switched.expected_ids))
+    state.aging_runtime.apply_arm(switched)
     return request
 
 

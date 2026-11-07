@@ -96,33 +96,9 @@ class AgingRuntime:
         self._service = service
         self._recorder = recorder
         self._gravity = gravity_model  # GravityModel | None
-        arm = getattr(settings, "arm", None)
-        # 老化只驱动转动关节（J1..J6），末端夹爪不参与（RS / DM 统一 6 轴）。
-        self._joint_limits = arm.joint_limits if arm is not None else _LEGACY_JOINT_LIMITS
-        self._joint_count = len(self._joint_limits)
-        self._expected_ids = (
-            arm.motor_ids if arm is not None else tuple(range(1, self._joint_count + 1))
-        )
-        # 完整链路（转动关节 + 夹爪）：旧录制动作是 7 条轨迹，接受后截断到
-        # 转动关节数，夹爪轨迹忽略。
-        self._full_joint_count = (
-            len(arm.joint_ids) if arm is not None else _LEGACY_FULL_TRAIL_COUNT
-        )
+        self._derive_arm(settings)
         self._home_tolerance = getattr(settings, "home_tolerance_rad", HOME_TOLERANCE_RAD)
         self._home_verify_mode = getattr(settings, "home_verify_mode", "warn")
-        # 健康状态码随机型厂商变化：
-        # - RobStride: 0 = 正常（非 0 即故障）
-        # - Damiao:    0 = 失能、1 = 使能，两者都正常；>= 8 才是故障
-        # 老化运行时按关节查表，未知关节按 RobStride 语义（只认 0）兜底。
-        self._healthy_status: dict[int, tuple[int, ...]] = {}
-        if arm is not None:
-            for motor in getattr(arm, "motors", ()) or ():
-                self._healthy_status[motor.id] = (
-                    (0, 1) if motor.vendor == "damiao" else (0,)
-                )
-            gripper = getattr(arm, "gripper", None)
-            if gripper is not None:
-                self._healthy_status[gripper.id] = (0, 1) if gripper.vendor == "damiao" else (0,)
         self._lock = threading.RLock()
         self._telemetry_lock = threading.RLock()
         self._latest_frame: dict[str, Any] | None = None
@@ -151,6 +127,40 @@ class AgingRuntime:
             "error": None,
             "elapsed_seconds": 0.0,
         }
+
+    def _derive_arm(self, settings) -> None:
+        """从 settings.arm 推导关节限位 / ID / 健康码。"""
+        arm = getattr(settings, "arm", None)
+        # 老化只驱动转动关节（J1..J6），末端夹爪不参与（RS / DM 统一 6 轴）。
+        self._joint_limits = arm.joint_limits if arm is not None else _LEGACY_JOINT_LIMITS
+        self._joint_count = len(self._joint_limits)
+        self._expected_ids = (
+            arm.motor_ids if arm is not None else tuple(range(1, self._joint_count + 1))
+        )
+        # 完整链路（转动关节 + 夹爪）：旧录制动作是 7 条轨迹，接受后截断到
+        # 转动关节数，夹爪轨迹忽略。
+        self._full_joint_count = (
+            len(arm.joint_ids) if arm is not None else _LEGACY_FULL_TRAIL_COUNT
+        )
+        # 健康状态码随机型厂商变化：
+        # - RobStride: 0 = 正常（非 0 即故障）
+        # - Damiao:    0 = 失能、1 = 使能，两者都正常；>= 8 才是故障
+        # 老化运行时按关节查表，未知关节按 RobStride 语义（只认 0）兜底。
+        self._healthy_status: dict[int, tuple[int, ...]] = {}
+        if arm is not None:
+            for motor in getattr(arm, "motors", ()) or ():
+                self._healthy_status[motor.id] = (
+                    (0, 1) if motor.vendor == "damiao" else (0,)
+                )
+            gripper = getattr(arm, "gripper", None)
+            if gripper is not None:
+                self._healthy_status[gripper.id] = (0, 1) if gripper.vendor == "damiao" else (0,)
+
+    def apply_arm(self, settings) -> None:
+        """机型切换后重新推导（调用方保证此时未连接、未老化）。"""
+        with self._lock:
+            self._settings = settings
+            self._derive_arm(settings)
 
     @property
     def available(self) -> bool:

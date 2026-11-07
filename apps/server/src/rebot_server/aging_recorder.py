@@ -60,6 +60,10 @@ class AgingRecorder:
     def available(self) -> bool:
         return self._store.enabled
 
+    def update_joint_count(self, joint_count: int) -> None:
+        """机型切换后更新每帧行数（调用方保证此时未在录制）。"""
+        self._joint_count = int(joint_count)
+
     def status(self) -> dict[str, Any]:
         with self._lock:
             return {

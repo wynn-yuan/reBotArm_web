@@ -588,6 +588,10 @@ class MotorbridgeTelemetryHub:
         # WebSocket clients. It must never read CAN or await disk I/O.
         self._frame_sink = frame_sink
 
+    def update_settings(self, settings) -> None:
+        """机型切换后换用新 settings（调用方保证此时已断开连接）。"""
+        self._settings = settings
+
     # ---- public API -------------------------------------------------------
 
     async def subscribe(self, websocket) -> None:

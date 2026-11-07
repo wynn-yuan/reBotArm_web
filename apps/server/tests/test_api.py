@@ -405,6 +405,39 @@ class ModelEndpointsTests(unittest.TestCase):
             self.assertEqual(scan["expected_ids"], list(EXPECTED_MOTOR_IDS))
             self.assertEqual(scan["status"], "connected")
 
+    def test_switch_rewires_write_and_aging_state_to_new_arm(self):
+        """切换机型后写入校验/遥测/老化必须按新机型的 ID 与关节数工作。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            state_file = str(Path(tmp) / "arm.state.json")
+            client = TestClient(
+                create_app(
+                    settings=load_settings(
+                        {
+                            "REBOT_ARM_STATE_FILE": state_file,
+                            "REBOT_ALLOW_ENABLE_WRITE": "1",
+                        }
+                    )
+                )
+            )
+            client.post("/api/robot/scan")  # RS：期望 1..7，模拟全部命中
+            client.post("/api/robot/disconnect")
+            response = client.post(
+                "/api/models/active", json={"arm_id": "rebot-devarm-dm"}
+            )
+            self.assertEqual(response.status_code, 200)
+            scan = client.post("/api/robot/scan").json()
+            self.assertEqual(scan["expected_ids"], [1, 2, 3, 4, 5, 6])
+            self.assertEqual(scan["status"], "connected")
+            # 旧 bug：写入网关仍持有 RS 的 1..7，DM 上所有操作都报
+            # “requires a completed full scan”。
+            outcome = client.post("/api/robot/enable").json()
+            self.assertNotEqual(
+                outcome.get("error", {}).get("code"), "requires_connected"
+            )
+            self.assertEqual(client.app.state.settings.expected_ids, (1, 2, 3, 4, 5, 6))
+            self.assertEqual(client.app.state.aging_runtime._joint_count, 6)
+            self.assertEqual(client.app.state.aging_recorder._joint_count, 6)
+
 
 if __name__ == "__main__":
     unittest.main()
